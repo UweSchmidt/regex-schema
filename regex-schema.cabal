@@ -17,6 +17,9 @@ library
   hs-source-dirs:      src
   exposed-modules:     Text.Regex.Schema.Core
                        Text.Regex.Schema
+
+  other-modules:       Text.Regex.Schema.StringLike
+  
   build-depends:       base               >= 4     && < 5
                      , bytestring         >= 0.10
                      , hxt-charproperties >= 9     && < 10

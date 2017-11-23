@@ -4,21 +4,28 @@ where
 import Data.Set.CharSet
 import Data.Monoid (Monoid(..), (<>))
 
-data RE a = Zero ErrMsg         -- {}
-          | Unit                -- {&epsilon;}
-          | Dot                 -- whole Alphabet
-          | Syms  CharSet       -- {a,b,c,...}
-          | Star  (RE a)        -- r*
-          | Plus  (RE a)        -- r+
-          | Seq   (RE a) (RE a) -- r1 . r2
-          | Or    (RE a) (RE a) -- r1 | r2
-          | Isect (RE a) (RE a) -- r1 & r2
-          | Diff  (RE a) (RE a) -- r1 - r2
-            deriving (Eq, Ord, Read, Show)
+import Text.Regex.Schema.StringLike
+
+-- ------------------------------------------------------------
+
+data RE a
+  = Zero ErrMsg         -- {}
+  | Unit                -- {&epsilon;}
+  | Dot                 -- whole Alphabet
+  | Syms  CharSet       -- {a,b,c,...}
+  | Star  (RE a)        -- r*
+  | Plus  (RE a)        -- r+
+  | Seq   (RE a) (RE a) -- r1 . r2
+  | Or    (RE a) (RE a) -- r1 | r2
+  | Isect (RE a) (RE a) -- r1 & r2
+  | Diff  (RE a) (RE a) -- r1 - r2
+  | SubM  Label  (RE a) -- submatch
+  deriving (Eq, Ord, Read, Show)
 
 type RegEx = RE Char
 
 type ErrMsg = String
+type Label  = String
 
 -- ------------------------------------------------------------
 --
@@ -45,27 +52,30 @@ sym = syms . singleCS
 symRng :: Char -> Char -> RE a
 symRng lb ub = syms $ rangeCS lb ub
 
+subMatch :: Label -> RE a -> RE a
+subMatch = SubM
+
 -- --------------------
 --
 -- smart constructor for sequence
 
-seq'                     :: RE a -> RE a -> RE a
-seq' r1@(Zero _)  _      = r1                    -- {}.r  == {}
-seq' _ r2@(Zero _)       = r2                    -- r.{}  == {}
-seq' Unit r2             = r2                    -- ().r  == r
-seq' r1   Unit           = r1                    -- r.()  == r
-seq' (Seq r1 r2) r3      = seq' r1 (seq' r2 r3)    -- assoc. of .
-seq' r1   r2             = Seq r1 r2
-
-seqs                    :: [RE a] -> RE a
-seqs                    = foldr seq' unit
+sequ                     :: RE a -> RE a -> RE a
+sequ r1@(Zero _)  _      = r1                    -- {}.r  == {}
+sequ _ r2@(Zero _)       = r2                    -- r.{}  == {}
+sequ Unit r2             = r2                    -- ().r  == r
+sequ r1   Unit           = r1                    -- r.()  == r
+sequ (Seq r1 r2) r3      = sequ r1 (sequ r2 r3)  -- assoc. of .
+sequ r1   r2             = Seq r1 r2
 
 instance Monoid (RE a) where
   mempty  = unit
-  mappend = seq'
+  mappend = sequ
+  mconcat = foldr sequ unit
+
+-- <> is sequ(ence)
 
 word :: String -> RE a
-word = foldr (\ a b -> seq' (sym a) b) unit
+word = foldr (\ a b -> sym a <> b) unit
 
 -- --------------------
 --
@@ -89,93 +99,29 @@ plus r                  = r <> star r           -- r+    == r.r*
 --
 -- smart constructor for alternative
 
-infixr .|.
+infixr 2 .|.
 
 (.|.)                   :: RE a -> RE a -> RE a
+Zero _    .|. r2        = r2                 -- zero
+r1        .|. Zero _    = r1                 -- zero
+Or r1 r2  .|. r3        = r1 .|. (r2 .|. r3) -- associativity
+r1        .|.  r2       = Or r1 r2
 
-Zero _    .|. r2         = r2               -- zero
-r1        .|. Zero _     = r1               -- zero
-Or r1 r2 .|. r3          = r1 .|. r2 .|. r3 -- associativity
-r1        .|.  r2        = Or r1 r2
+-- --------------------
+--
+-- smart constructor for intersection
 
--- ------------------------------------------------------------
+infixr 3 .&.
 
-nullable              :: RE a -> Bool
+(.&.)                   :: RE a -> RE a -> RE a
+z@(Zero _) .&. _r2      = z                  -- {} n r2 = {}
+_r1  .&.  z@(Zero _)    = z                  -- r1 n {} = {}
 
-nullable (Zero _)       = False
-nullable Unit           = True
-nullable Dot            = False
-nullable (Syms _x)      = False
-nullable (Star _r)      = True
-nullable (Plus r)       = nullable r
-nullable (Seq r1 r2)    = nullable r1
-                          &&
-                          nullable r2
-nullable (Or r1 r2)    = nullable r1
-                          ||
-                          nullable r2
-nullable (Isect r1 r2)  = nullable r1
-                          &&
-                          nullable r2
-nullable (Diff r1 r2)   = nullable r1
-                          &&
-                          not (nullable r2)
+Star Dot .&. r2         = r2                 -- A* n r2 = r2
+r1       .&. Star Dot   = r1                 -- r1 n A* = r1
 
--- ------------------------------------------------------------
-
-delta :: RE a -> Char -> RE a
-
-delta r@(Zero _) _c = r
-
-delta Unit _c       = noMatch
-
-delta Dot  _c       = Unit
-
-delta (Syms cs) c
-  | c `elemCS` cs   = Unit
-  | otherwise       = noMatch
-
-delta (Star r) a
-    = Seq
-      (delta r a)
-      (Star r)
-
-delta (Plus r) a
-    = delta (Seq r (Star r)) a
-
-delta (Seq r1 r2) a
-  | nullable r1 = dr1 .|. dr2
-  | otherwise   = dr1
-    where
-    dr1 = Seq (delta r1 a) r2
-    dr2 = delta r2 a
-
-delta (Or r1 r2) a
-    = delta r1 a
-      .|.
-      delta r2 a
-
-delta (Isect r1 r2) a
-    = Isect
-      (delta r1 a)
-      (delta r2 a)
-
-delta (Diff r1 r2) a
-    = Diff
-      (delta r1 a)
-      (delta r2 a)
-
--- ------------------------------------------------------------
-
-delta' :: RE a -> String-> RE a
-
-delta' re []    = re
-delta' re (c : ws) = delta' (delta re c) ws
-
-
-match :: RE a -> String -> Bool
-
-match re ws = nullable (delta' re ws)
+Isect r1 r2 .&. r3      = r1 .&. (r2 .&. r3) -- associativity
+r1 .&. r2               = Isect r1 r2
 
 -- ------------------------------------------------------------
 
@@ -238,91 +184,81 @@ diff r1   r2
 
 -- ------------------------------------------------------------
 
-delta1 :: RE a -> Char -> RE a
+nullable                :: RE a -> Bool
 
-delta1 z@(Zero _) _a  = z
+nullable (Zero _)       = False
+nullable Unit           = True
+nullable Dot            = False
+nullable (Syms _x)      = False
+nullable (Star _r)      = True
+nullable (Plus r)       = nullable r
+nullable (Seq r1 r2)    = nullable r1
+                          &&
+                          nullable r2
+nullable (Or r1 r2)    = nullable r1
+                          ||
+                          nullable r2
+nullable (Isect r1 r2)  = nullable r1
+                          &&
+                          nullable r2
+nullable (Diff r1 r2)   = nullable r1
+                          &&
+                          not (nullable r2)
 
-delta1 Unit _c        = noMatch
-
-delta1 Dot  _c        = unit
-
-delta1 (Syms cs) c
-  | c `elemCS` cs     = unit
-  | otherwise         = noMatch
-
-delta1 (Star r) a
-    = delta1 r a
-      <>
-      star r
-
-delta1 (Plus r) a
-    = delta1 (r <> star r) a
-
-delta1 (Seq r1 r2) a
-  | nullable r1 = dr1 .|. dr2
-  | otherwise   = dr1
-    where
-    dr1 = delta1 r1 a <> r2
-    dr2 = delta1 r2 a
-
-delta1 (Or r1 r2) a
-    = delta1 r1 a
-      .|.
-      delta1 r2 a
-
-delta1 (Isect r1 r2) a
-    = isect
-      (delta1 r1 a)
-      (delta1 r2 a)
-
-delta1 (Diff r1 r2) a
-    = diff
-      (delta1 r1 a)
-      (delta1 r2 a)
+nullable (SubM l r1)    = nullable r1
 
 -- ------------------------------------------------------------
 
-delta1' :: RE a -> String-> RE a
+delta :: RE a -> Char -> RE a
 
-delta1' re []    = re
-delta1' re (c : ws) = delta1' (delta1 re c) ws
+delta z@(Zero _) _a   = z
+
+delta Unit _c         = noMatch
+
+delta Dot  _c         = unit
+
+delta (Syms cs) c
+  | c `elemCS` cs     = unit
+  | otherwise         = noMatch
+
+delta (Star r) c      = delta r c
+                        <>
+                        star r
+
+delta (Plus r) c      = delta (r <> star r) c
+
+delta (Seq r1 r2) c
+  | nullable r1       = dr1 .|. dr2
+  | otherwise         = dr1
+  where
+                  dr1 = delta r1 c <> r2
+                  dr2 = delta r2 c
+
+delta (Or r1 r2) c    = delta r1 c
+                        .|.
+                        delta r2 c
+
+delta (Isect r1 r2) c = delta r1 c
+                        ` isect`
+                        delta r2 c
+
+delta (Diff r1 r2) c  = delta r1 c
+                        `diff`
+                        delta r2 c
+
+delta (SubM l r1) c   = delta r1 c  -- TODO
+
+-- ------------------------------------------------------------
+
+delta' :: RE a -> String-> RE a
+
+delta' re []       = re
+delta' re (c : ws) = delta' (delta re c) ws
 
 
 match1 :: RE a -> String -> Bool
 
-match1 re ws = nullable (delta1' re ws)
-
--- ------------------------------------------------------------
---
--- not computable with the similar simple
--- algorithmn as nullable: Isect and Diff are the hard ops
-
-nullable'              :: RE a -> Bool
-
-nullable' (Zero _)  = True
-nullable' Unit      = False
-nullable' Dot       = False
-nullable' (Syms _)  = False
-nullable' (Star _r) = False
-nullable' (Plus r)  = nullable' r
-nullable' (Seq r1 r2)
-                = nullable' r1
-                  ||
-                  nullable' r2
-nullable' (Or r1 r2)
-                = nullable' r1
-                  &&
-                  nullable' r2
-nullable' (Isect r1 r2)
-                = nullable' r1
-                  &&
-                  nullable' r2
-
-nullable' (Diff r1 (Star Dot))
-                = True
-nullable' (Diff r1 r2)
-  | nullable' r2    = False
-  | otherwise   = nullable' r1
+match1 re ws = nullable (delta' re ws)
 
 -- ------------------------------------------------------------
 --
@@ -332,16 +268,17 @@ showR :: RegEx -> String
 showR = showRegex 6
 
 prio    :: RE a -> Int
-prio (Zero _)   = 0
-prio Unit       = 0
-prio Dot        = 0
-prio (Syms _)   = 0
-prio (Star _)   = 1
-prio (Plus _)   = 1
-prio (Seq _ _)  = 2
-prio (Isect _ _)= 3
-prio (Diff _ _) = 4
-prio (Or _ _)  = 5
+prio (Zero _)    = 0
+prio Unit        = 0
+prio Dot         = 0
+prio (Syms _)    = 0
+prio (Star _)    = 1
+prio (Plus _)    = 1
+prio (Seq _ _)   = 2
+prio (Isect _ _) = 3
+prio (Diff _ _)  = 4
+prio (Or _ _)    = 5
+prio (SubM _ _)  = 10
 
 showRegex       :: Int -> RegEx -> String
 showRegex p r
@@ -373,6 +310,8 @@ showRegex p r
     showRegex' (Diff  r1 r2) = showRegex pr r1
                                ++ "-" ++
                                showRegex pr r2
+    showRegex' (SubM lab r1) = lab ++ ":" ++
+                               showRegex pr r1
 
     showCS cs
       | cs == compCS (stringCS "\n\r")

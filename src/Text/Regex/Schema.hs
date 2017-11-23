@@ -35,10 +35,10 @@ worstCase n     = repN n (alt a1 unit) <> repN n a1
 
 ccomment        :: RegEx
 ccomment
-    = seqs [ openCmt
-           , all `diff` (seqs [all,closeCmt,all])
-           , closeCmt
-           ]
+    = mconcat [ openCmt
+              , all `diff` mconcat [all,closeCmt,all]
+              , closeCmt
+              ]
     where
     all         = star dot
     openCmt     = word "/*"
@@ -46,10 +46,10 @@ ccomment
 
 htmlcomment        :: RegEx
 htmlcomment
-    = seqs [ openCmt
-           , all `diff` (seqs [all,closeCmt,all])
-           , closeCmt
-           ]
+    = mconcat [ openCmt
+              , all `diff` mconcat [all,closeCmt,all]
+              , closeCmt
+              ]
     where
     all         = star dot
     openCmt     = word "<!--"
@@ -57,16 +57,21 @@ htmlcomment
 
 xmlcomment        :: RegEx
 xmlcomment
-    = seqs [ openCmt
-           , all `diff` (seqs [all,noCmt,all])
-           , closeCmt
-           ]
+    = mconcat [ openCmt
+              , all `diff` mconcat [all,noCmt,all]
+              , closeCmt
+              ]
     where
     all         = star dot
     openCmt     = word "<!--"
     closeCmt    = word "-->"
     noCmt       = word "--"
 
+sub1 :: RegEx
+sub1 = mconcat [ sym 'a'
+               , subMatch "1" $ plus $ sym 'i'
+               , sym 'z'
+               ]
 
 
 testsT mt
@@ -97,7 +102,7 @@ deltaTests show' d' r w
 
 deltaSimple     = deltaTests show  delta'
 deltaSimple'    = deltaTests showR delta'
-deltaSmart      = deltaTests showR delta1'
+deltaSmart      = deltaTests showR delta'
 
 dt1  = deltaSimple  aStar             "aaaaa"
 dt2  = deltaSimple  aStarOrbStar      "aaaaa"
