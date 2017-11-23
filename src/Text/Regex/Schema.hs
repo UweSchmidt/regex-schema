@@ -2,7 +2,7 @@ module Text.Regex.Schema
 where
 
 import Text.Regex.Schema.Core
-
+import Data.Monoid (Monoid(..), (<>))
 import Data.List (inits)
 
 import Prelude hiding (seq)
@@ -13,25 +13,25 @@ import Prelude hiding (seq)
 
 a1, b1, aStar, aOrb, ab, a2 :: RegEx
 
-a1      = Sym 'a'
-b1      = Sym 'b'
+a1      = sym 'a'
+b1      = sym 'b'
 aStar   = Star a1
-aOrb    = Union a1 b1
+aOrb    = alt a1 b1
 ab      = Seq a1 b1
 a2      = Seq a1 a1
 
 aOrbStar, aStarOrbStar, allWords, allMinusAStar :: RegEx
 
 aOrbStar        = star aOrb
-aStarOrbStar    = star (Union aStar b1)
+aStarOrbStar    = star (alt aStar b1)
 allWords        = star Dot
 allMinusAStar   = diff allWords aStar
 
 repN            :: Int -> RegEx -> RegEx
-repN n          = foldr seq unit . replicate n
+repN n          = foldr (<>) unit . replicate n
 
 worstCase       :: Int -> RegEx
-worstCase n     = seq (repN n (union a1 unit)) (repN n a1)
+worstCase n     = repN n (alt a1 unit) <> repN n a1
 
 ccomment        :: RegEx
 ccomment
