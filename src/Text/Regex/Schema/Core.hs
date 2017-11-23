@@ -3,7 +3,7 @@ where
 
 import Prelude hiding (seq)
 
-data RE a = Zero                -- {}
+data RE a = Zero ErrMsg         -- {}
           | Unit                -- {&epsilon;}
           | Dot                 -- whole Alphabet
           | Sym   a             -- {a}
@@ -17,11 +17,18 @@ data RE a = Zero                -- {}
 
 type RegEx = RE Char
 
+type ErrMsg = String
+
+-- ------------------------------------------------------------
+
+noMatch :: RE a
+noMatch = Zero "no match"
+
 -- ------------------------------------------------------------
 
 nullable              :: RE a -> Bool
 
-nullable Zero           = False
+nullable (Zero _)       = False
 nullable Unit           = True
 nullable Dot            = False
 nullable (Sym _x)       = False
@@ -44,15 +51,15 @@ nullable (Diff r1 r2)   = nullable r1
 
 delta :: Eq a => RE a -> a -> RE a
 
-delta Zero _a   = Zero
+delta r@(Zero _) _a = r
 
-delta Unit _a   = Zero
+delta Unit _a       = noMatch
 
-delta Dot  _a   = Unit
+delta Dot  _a       = Unit
 
 delta (Sym x) a
-  | a == x      = Unit
-  | otherwise   = Zero
+  | a == x          = Unit
+  | otherwise       = noMatch
 
 delta (Star r) a
     = Seq
@@ -103,7 +110,7 @@ match re w = nullable (delta' re w)
 -- implemented with "smart" constructors
 -- not all allgebraic laws concerning sets are realized
 
-zero                    :: RE a
+zero                    :: ErrMsg -> RE a
 zero                    = Zero
 
 unit                    :: RE a
@@ -121,7 +128,7 @@ word                    = foldr (\ a b -> seq (sym a) b) unit
 -- --------------------
 
 star                    :: RE a -> RE a
-star Zero               = unit                  -- {}* == ()
+star (Zero _)           = unit                  -- {}* == ()
 star r@Unit             = r                     -- ()* == ()
 star r@(Star _r1)       = r                     -- (r*)* == r*
 star r@(Plus r1)        = Star r1               -- (r+)* == r*
@@ -130,7 +137,7 @@ star r                  = Star r
 -- --------------------
 
 plus                    :: RE a -> RE a
-plus r@Zero             = r                     -- {}+ == {}
+plus r@(Zero _)         = r                     -- {}+ == {}
 plus r@Unit             = r                     -- ()+ == ()
 plus r@(Star r1)        = r                     -- (r*)+ == r*
 plus r@(Plus _r1)       = r                     -- (r+)+ == r+
@@ -139,8 +146,8 @@ plus r                  = seq r (star r)        -- r+    == r.r*
 -- --------------------
 
 seq                     :: RE a -> RE a -> RE a
-seq Zero r2             = Zero                  -- {}.r  == {}
-seq r1   Zero           = Zero                  -- r.{}  == {}
+seq r1@(Zero _)  _      = r1                    -- {}.r  == {}
+seq _ r2@(Zero _)       = r2                    -- r.{}  == {}
 seq Unit r2             = r2                    -- ().r  == r
 seq r1   Unit           = r1                    -- r.()  == r
 seq (Seq r1 r2) r3      = seq r1 (seq r2 r3)    -- assoc. of .
@@ -152,8 +159,8 @@ seqs                    = foldr seq unit
 -- --------------------
 
 union                   :: (Eq a, Ord a) => RE a -> RE a -> RE a
-union Zero r2           = r2
-union r1   Zero         = r1
+union (Zero _) r2       = r2
+union r1 (Zero _)       = r1
 
 union r1@(Star Dot) r2  = r1
 union r1 r2@(Star Dot)  = r2
@@ -172,8 +179,8 @@ union r1   r2
 -- --------------------
 
 isect                   :: (Eq a, Ord a) => RE a -> RE a -> RE a
-isect Zero r2           = Zero
-isect r1   Zero         = Zero
+isect z@(Zero _) _      = z
+isect _ z@(Zero _)      = z
 
 isect (Star Dot) r2     = r2
 isect r1 (Star Dot)     = r1
@@ -194,26 +201,26 @@ isect r1   r2
 -- --------------------
 
 diff                    :: Eq a => RE a -> RE a -> RE a
-diff Zero r2            = Zero
-diff r1   Zero          = r1
-diff r1  (Star Dot)     = Zero
+diff r1@(Zero _) r2     = r1
+diff r1 (Zero _)        = r1
+diff r1 (Star Dot)      = noMatch
 diff r1   r2
-    | r1 == r2          = Zero
+    | r1 == r2          = noMatch
     | otherwise         = Diff r1 r2
 
 -- ------------------------------------------------------------
 
 delta1 :: (Eq a, Ord a) => RE a -> a -> RE a
 
-delta1 Zero _a  = zero
+delta1 z@(Zero _) _a  = z
 
-delta1 Unit _a  = zero
+delta1 Unit _a        = noMatch
 
-delta1 Dot  _a  = unit
+delta1 Dot  _a        = unit
 
 delta1 (Sym x) a
-  | a == x      = unit
-  | otherwise   = zero
+  | a == x            = unit
+  | otherwise         = noMatch
 
 delta1 (Star r) a
     = seq
@@ -264,7 +271,7 @@ match1 re w = nullable (delta1' re w)
 
 empty              :: RE a -> Bool
 
-empty Zero      = True
+empty (Zero _)  = True
 empty Unit      = False
 empty Dot       = False
 empty (Sym _x)  = False
@@ -296,7 +303,7 @@ showR :: RegEx -> String
 showR = showRegex 6
 
 prio    :: RE a -> Int
-prio Zero       = 0
+prio (Zero _)   = 0
 prio Unit       = 0
 prio Dot        = 0
 prio (Sym _)    = 0
@@ -315,7 +322,7 @@ showRegex p r
     par s
         | pr > p        = "(" ++ s ++ ")"
         | otherwise     = s
-    showRegex' Zero     = "{}"
+    showRegex' (Zero _) = "{}"
     showRegex' Unit     = "()"
     showRegex' Dot      = "."
     showRegex' (Sym a)
