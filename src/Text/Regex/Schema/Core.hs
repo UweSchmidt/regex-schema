@@ -13,8 +13,8 @@ data RE a
   | Unit                -- {&epsilon;}
   | Dot                 -- whole Alphabet
   | Syms  CharSet       -- {a,b,c,...}
-  | Star  (RE a)        -- r*
-  | Plus  (RE a)        -- r+
+  | Star  (RE a) Bool   -- r* / r*?   -- True: shortest match
+  | Plus  (RE a) Bool   -- r+ / r+?
   | Seq   (RE a) (RE a) -- r1 . r2
   | Or    (RE a) (RE a) -- r1 | r2
   | Isect (RE a) (RE a) -- r1 & r2
@@ -61,11 +61,13 @@ subMatch = SubM
 
 sequ                     :: RE a -> RE a -> RE a
 sequ r1@(Zero _)  _      = r1                    -- {}.r  == {}
-sequ _ r2@(Zero _)       = r2                    -- r.{}  == {}
 sequ Unit r2             = r2                    -- ().r  == r
-sequ r1   Unit           = r1                    -- r.()  == r
 sequ (Seq r1 r2) r3      = sequ r1 (sequ r2 r3)  -- assoc. of .
 sequ r1   r2             = Seq r1 r2
+
+-- aren't build in delta computations
+-- sequ _ r2@(Zero _)       = r2                    -- r.{}  == {}
+-- sequ r1   Unit           = r1                    -- r.()  == r
 
 instance Monoid (RE a) where
   mempty  = unit
@@ -81,19 +83,31 @@ word = foldr (\ a b -> sym a <> b) unit
 --
 -- smart constructor for * and +
 
-star                    :: RE a -> RE a
-star (Zero _)           = unit                  -- {}* == ()
-star r@Unit             = r                     -- ()* == ()
-star r@(Star _r1)       = r                     -- (r*)* == r*
-star r@(Plus r1)        = Star r1               -- (r+)* == r*
-star r                  = Star r
+star                     :: RE a -> RE a
+star r                   = star' r False
 
-plus                    :: RE a -> RE a
-plus r@(Zero _)         = r                     -- {}+ == {}
-plus r@Unit             = r                     -- ()+ == ()
-plus r@(Star r1)        = r                     -- (r*)+ == r*
-plus r@(Plus _r1)       = r                     -- (r+)+ == r+
-plus r                  = r <> star r           -- r+    == r.r*
+-- shortest match
+starSM                   :: RE a -> RE a
+starSM r                 = star' r False
+
+star'                    :: RE a -> Bool -> RE a
+star' (Zero _)       _  = unit                  -- {}* == ()
+star' r@Unit         _  = r                     -- ()* == ()
+star' r@(Star _ s1)  s
+  | s1 == s             = r                     -- (r*)* == r*
+star' r@(Plus r1 s1) s
+  | s1 == s             = Star r1 s1            -- (r+)* == r*
+star' r              s  = Star r  s
+
+
+plus'                   :: RE a -> Bool -> RE a
+plus' r@(Zero _)     _  = r                     -- {}+ == {}
+plus' r@Unit         _  = r                     -- ()+ == ()
+plus' r@(Star r1 s1) s
+  | s1 == s             = r                     -- (r*)+ == r*
+plus' r@(Plus _  s1) s
+  | s1 == s             = r                     -- (r+)+ == r+
+plus' r              s  = Plus r s
 
 -- --------------------
 --
@@ -117,8 +131,8 @@ infixr 3 .&.
 z@(Zero _) .&. _r2      = z                  -- {} n r2 = {}
 _r1  .&.  z@(Zero _)    = z                  -- r1 n {} = {}
 
-Star Dot .&. r2         = r2                 -- A* n r2 = r2
-r1       .&. Star Dot   = r1                 -- r1 n A* = r1
+Star Dot _ .&. r2       = r2                 -- A* n r2 = r2
+r1       .&. Star Dot _ = r1                 -- r1 n A* = r1
 
 Isect r1 r2 .&. r3      = r1 .&. (r2 .&. r3) -- associativity
 r1 .&. r2               = Isect r1 r2
@@ -136,8 +150,8 @@ alt                   :: RE a -> RE a -> RE a
 alt (Zero _) r2       = r2
 alt r1 (Zero _)       = r1
 
-alt r1@(Star Dot) r2  = r1
-alt r1 r2@(Star Dot)  = r2
+alt r1@(Star Dot _) r2  = r1
+alt r1 r2@(Star Dot _)  = r2
 
 alt (Or r1 r2) r3  = alt r1 (alt r2 r3)
                                         -- associativity
@@ -156,8 +170,8 @@ isect                   :: RE a -> RE a -> RE a
 isect z@(Zero _) _      = z
 isect _ z@(Zero _)      = z
 
-isect (Star Dot) r2     = r2
-isect r1 (Star Dot)     = r1
+isect (Star Dot _) r2   = r2
+isect r1 (Star Dot _)   = r1
 
 isect (Isect r1 r2) r3  = isect r1 (isect r2 r3)
                                         -- associativity
@@ -177,35 +191,37 @@ isect r1   r2
 diff                    :: RE a -> RE a -> RE a
 diff r1@(Zero _) r2     = r1
 diff r1 (Zero _)        = r1
-diff r1 (Star Dot)      = noMatch
+diff r1 (Star Dot _)    = noMatch
 diff r1   r2
     | r1 == r2          = noMatch
     | otherwise         = Diff r1 r2
 
 -- ------------------------------------------------------------
+--
+-- cases sorted by frequency of operators
 
 nullable                :: RE a -> Bool
 
-nullable (Zero _)       = False
-nullable Unit           = True
-nullable Dot            = False
-nullable (Syms _x)      = False
-nullable (Star _r)      = True
-nullable (Plus r)       = nullable r
 nullable (Seq r1 r2)    = nullable r1
                           &&
                           nullable r2
-nullable (Or r1 r2)    = nullable r1
+nullable (Or r1 r2)     = nullable r1
                           ||
                           nullable r2
+nullable (Syms _x)      = False
+nullable (Zero _)       = False
+nullable  Unit          = True
+nullable (Plus  r _)    = nullable r
+nullable  Dot           = False
+nullable (Star  _ _)    = True
 nullable (Isect r1 r2)  = nullable r1
                           &&
                           nullable r2
-nullable (Diff r1 r2)   = nullable r1
+nullable (Diff  r1 r2)  = nullable r1
                           &&
                           not (nullable r2)
 
-nullable (SubM l r1)    = nullable r1
+nullable (SubM  l  r1)  = nullable r1
 
 -- ------------------------------------------------------------
 
@@ -221,11 +237,13 @@ delta (Syms cs) c
   | c `elemCS` cs     = unit
   | otherwise         = noMatch
 
-delta (Star r) c      = delta r c
-                        <>
-                        star r
+delta (Star r s) c
+  | s                 = delta r c <> (unit      .|. plus' r s)
+  | otherwise         = delta r c <> (plus' r s .|. unit  )
 
-delta (Plus r) c      = delta (r <> star r) c
+delta r0@(Plus r s) c
+  | s                 = delta (r <> (unit .|. r0  )) c
+  | otherwise         = delta (r <> (r0   .|. unit)) c
 
 delta (Seq r1 r2) c
   | nullable r1       = dr1 .|. dr2
@@ -272,8 +290,8 @@ prio (Zero _)    = 0
 prio Unit        = 0
 prio Dot         = 0
 prio (Syms _)    = 0
-prio (Star _)    = 1
-prio (Plus _)    = 1
+prio (Star _ _)  = 1
+prio (Plus _ _)  = 1
 prio (Seq _ _)   = 2
 prio (Isect _ _) = 3
 prio (Diff _ _)  = 4
@@ -286,6 +304,9 @@ showRegex p r
     where
     pr  = prio r
 
+    sm True = "?"
+    sm _    = ""
+
     par s
         | pr > p         = "(" ++ s ++ ")"
         | otherwise      = s
@@ -294,10 +315,10 @@ showRegex p r
     showRegex' Unit          = "()"
     showRegex' Dot           = "."
     showRegex' (Syms cs)     = showCS cs
-    showRegex' (Star r1)     = showRegex pr r1
-                               ++ "*"
-    showRegex' (Plus r1)     = showRegex pr r1
-                               ++ "+"
+    showRegex' (Star r1 s)   = showRegex pr r1
+                               ++ "*" ++ sm s
+    showRegex' (Plus r1 s)   = showRegex pr r1
+                               ++ "+" ++ sm s
     showRegex' (Seq r1 r2)   = showRegex pr r1
                                ++
                                showRegex pr r2
