@@ -15,7 +15,7 @@ a1, b1, aStar, aOrb, ab, a2 :: RegEx
 
 a1      = sym 'a'
 b1      = sym 'b'
-aStar   = Star a1
+aStar   = star a1
 aOrb    = alt a1 b1
 ab      = Seq a1 b1
 a2      = Seq a1 a1
@@ -58,18 +58,18 @@ htmlcomment
 xmlcomment        :: RegEx
 xmlcomment
     = mconcat [ openCmt
-              , all `diff` mconcat [all,noCmt,all]
+              , allWords `diff` mconcat [allWords, noCmt, allWords]
               , closeCmt
               ]
     where
-    all         = star dot
+    allWords    = star dot
     openCmt     = word "<!--"
     closeCmt    = word "-->"
     noCmt       = word "--"
 
 sub1 :: RegEx
 sub1 = mconcat [ sym 'a'
-               , subMatch "1" $ plus $ sym 'i'
+               , subRE "1" $ plus $ sym 'i'
                , sym 'z'
                ]
 

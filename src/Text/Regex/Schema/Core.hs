@@ -19,7 +19,7 @@ data RE a
   | Or    (RE a) (RE a) -- r1 | r2
   | Isect (RE a) (RE a) -- r1 & r2
   | Diff  (RE a) (RE a) -- r1 - r2
-  | SubM  Label  (RE a) -- submatch
+  | SubRE Label  (RE a) -- submatch
   deriving (Eq, Ord, Read, Show)
 
 type RegEx = RE Char
@@ -52,8 +52,8 @@ sym = syms . singleCS
 symRng :: Char -> Char -> RE a
 symRng lb ub = syms $ rangeCS lb ub
 
-subMatch :: Label -> RE a -> RE a
-subMatch = SubM
+subRE :: Label -> RE a -> RE a
+subRE = SubRE
 
 -- --------------------
 --
@@ -61,13 +61,11 @@ subMatch = SubM
 
 sequ                     :: RE a -> RE a -> RE a
 sequ r1@(Zero _)  _      = r1                    -- {}.r  == {}
+sequ _ r2@(Zero _)       = r2                    -- r.{}  == {}
 sequ Unit r2             = r2                    -- ().r  == r
+sequ r1   Unit           = r1                    -- r.()  == r
 sequ (Seq r1 r2) r3      = sequ r1 (sequ r2 r3)  -- assoc. of .
 sequ r1   r2             = Seq r1 r2
-
--- aren't build in delta computations
--- sequ _ r2@(Zero _)       = r2                    -- r.{}  == {}
--- sequ r1   Unit           = r1                    -- r.()  == r
 
 instance Monoid (RE a) where
   mempty  = unit
@@ -86,27 +84,41 @@ word = foldr (\ a b -> sym a <> b) unit
 star                     :: RE a -> RE a
 star r                   = star' r False
 
+plus                     :: RE a -> RE a
+plus r                   = plus' r False
+
 -- shortest match
 starSM                   :: RE a -> RE a
 starSM r                 = star' r False
 
+plusSM                   :: RE a -> RE a
+plusSM r                 = plus' r False
+
 star'                    :: RE a -> Bool -> RE a
 star' (Zero _)       _  = unit                  -- {}* == ()
 star' r@Unit         _  = r                     -- ()* == ()
+
+{- not neccesary during delta eval
 star' r@(Star _ s1)  s
   | s1 == s             = r                     -- (r*)* == r*
 star' r@(Plus r1 s1) s
   | s1 == s             = Star r1 s1            -- (r+)* == r*
+-}
+
 star' r              s  = Star r  s
 
 
 plus'                   :: RE a -> Bool -> RE a
 plus' r@(Zero _)     _  = r                     -- {}+ == {}
 plus' r@Unit         _  = r                     -- ()+ == ()
+
+{- not neccesary during delta eval
 plus' r@(Star r1 s1) s
   | s1 == s             = r                     -- (r*)+ == r*
 plus' r@(Plus _  s1) s
   | s1 == s             = r                     -- (r+)+ == r+
+-}
+
 plus' r              s  = Plus r s
 
 -- --------------------
@@ -191,7 +203,11 @@ isect r1   r2
 diff                    :: RE a -> RE a -> RE a
 diff r1@(Zero _) r2     = r1
 diff r1 (Zero _)        = r1
+
+{- not neccesary during delta eval
 diff r1 (Star Dot _)    = noMatch
+-}
+
 diff r1   r2
     | r1 == r2          = noMatch
     | otherwise         = Diff r1 r2
@@ -221,7 +237,7 @@ nullable (Diff  r1 r2)  = nullable r1
                           &&
                           not (nullable r2)
 
-nullable (SubM  l  r1)  = nullable r1
+nullable (SubRE  l  r1) = nullable r1
 
 -- ------------------------------------------------------------
 
@@ -237,7 +253,7 @@ delta (Syms cs) c
   | c `elemCS` cs     = unit
   | otherwise         = noMatch
 
-delta (Star r s) c
+delta r0@(Star r s) c
   | s                 = delta r c <> (unit      .|. plus' r s)
   | otherwise         = delta r c <> (plus' r s .|. unit  )
 
@@ -264,7 +280,7 @@ delta (Diff r1 r2) c  = delta r1 c
                         `diff`
                         delta r2 c
 
-delta (SubM l r1) c   = delta r1 c  -- TODO
+delta (SubRE l r1) c  = delta r1 c  -- TODO
 
 -- ------------------------------------------------------------
 
@@ -296,7 +312,7 @@ prio (Seq _ _)   = 2
 prio (Isect _ _) = 3
 prio (Diff _ _)  = 4
 prio (Or _ _)    = 5
-prio (SubM _ _)  = 10
+prio (SubRE _ _) = 10
 
 showRegex       :: Int -> RegEx -> String
 showRegex p r
@@ -331,7 +347,7 @@ showRegex p r
     showRegex' (Diff  r1 r2) = showRegex pr r1
                                ++ "-" ++
                                showRegex pr r2
-    showRegex' (SubM lab r1) = lab ++ ":" ++
+    showRegex' (SubRE lab r1) = lab ++ ":" ++
                                showRegex pr r1
 
     showCS cs
