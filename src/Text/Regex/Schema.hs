@@ -67,8 +67,9 @@ xmlcomment
     closeCmt    = word "-->"
     noCmt       = word "--"
 
+
 sub1 :: RE
-sub1 = mconcat [ sym 'a'
+sub1 = mconcat [ unit -- sym 'a'
                , subRE "1" $ plus $ sym 'i'
                , sym 'z'
                ]
@@ -132,3 +133,11 @@ dsx2 = deltaSmart xmlcomment "<!--xxx--xxx-->"
 dsx3 = deltaSmart xmlcomment "<!--xxx-->xxx-->"
 
 -- ------------------------------------------------------------
+
+testNF1 :: RE -> [String]
+testNF1 r = map (showRegex 99) $ flip runREX mempty $ toNF r
+
+testNF2 :: RE -> [String]
+testNF2 r = map (showRegex 99) $ flip runREX mempty $ toNF r >>= toNF
+
+run = flip runREX mempty

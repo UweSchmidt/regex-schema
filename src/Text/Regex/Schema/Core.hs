@@ -29,15 +29,24 @@ data RE
   | Or        RE RE -- r1 | r2
   | Isect     RE RE -- r1 & r2
   | Diff      RE RE -- r1 - r2
-  | SubRE     RE Label  -- submatch
-  | OpenSub   RE Label String  -- TODO: generalize -- open subexpr with string and len of submatch
-  | ClosedSub RE [(Label, String)]  -- TODO: generalize -- list of completely parsed submatches
-  deriving (Read, Show)
+  | BsubRE    Label
+  | EsubRE
+--  | SubRE     RE Label  -- submatch
+--  | OpenSub   RE Label String  -- TODO: generalize -- open subexpr with string and len of submatch
+--  | ClosedSub RE [(Label, String)]  -- TODO: generalize -- list of completely parsed submatches
+  deriving (Eq, Ord, Read, Show)
 
 -- instance Show RE where  show = showRegex 0
 
 type ErrMsg = String
 type Label  = String
+
+instance Monoid RE where
+  mempty  = unit
+  mappend = seq'
+  mconcat = foldr seq' unit
+
+-- <> is sequ(ence)
 
 -- ----------------------------------------
 
@@ -91,27 +100,27 @@ runREX (REX cxf) = cxf
 
 -- ----------------------------------------
 
-data SubMatches = SM { closedSubs :: [(Label, String)] -- TODO: remove doublicates
-                     , openSubs   :: [(Label, String)]
-                     }
+data SubMatches
+  = SM { closedSubs :: [(Label, String)] -- TODO: remove doublicates
+       , openSubs   :: [(Label, String)]
+       }
+  deriving Show
 
-type RENF = (RE, SubMatches)
+emptySubMatches :: SubMatches
+emptySubMatches = SM [] []
 
-toNF' :: SubMatches -> RE -> REX (RE, SubMatches)
-toNF' sm re = (\ r -> (r, sm)) <$> toNF re
+type RENF = (SubMatches, RE)
+
+toNF' :: SubMatches -> RE -> REX (SubMatches, RE)
+toNF' sm re = (\ r -> (sm, r)) <$> toNF re
 
 toNF :: RE -> REX RE
-toNF (Zero _)                 = empty
-toNF r0@Dot                   = return r0
-toNF r0@Unit                  = return r0
-toNF r0@(Syms _cs)            = return r0
-
 toNF (Or r1 r2)               = toNF r1
                                 <|>
                                 toNF r2
 
 toNF (Star r shortest)
-  | (Star r1 s1) <- r         = toNF (star' (plus' r1 s1) shortest)
+  | (Star r1 s1) <- r         = toNF (star' (plus' r1 s1) (shortest && s1))
   | shortest                  = return Unit
                                 <|>
                                 toNF (plus' r True)
@@ -119,59 +128,123 @@ toNF (Star r shortest)
                                 <|>
                                 return Unit
 
-toNF (Plus r b)               = toNF (Seq r (star' r b))
+toNF (Plus r b)               = toNF (r <> (star' r b))
 
-toNF (Diff r1 (Zero _))       = toNF r1
-toNF (Diff r1 Unit)
-  | not (nullable r1)         = toNF r1
-toNF r0@(Diff r1 r2)          = case r1 of
-  Zero _                     -> empty
-  Unit
-    | nullable r2            -> empty
-  Diff r11 r12               -> toNF (diff' r11 (alt r12 r2))
-  Or   _   _                 -> toNF r1
+toNF r0@(Diff r1 r2)          = toNF r1
                                 >>=
-                                \ r' -> toNF (diff' r' r2)
-  _                          -> return r0
+                                \ r' -> toREX (r' `diff` r2)
 
 toNF r0@(Seq r1 r2)          = case r1 of
-  Syms _                     -> return r0
-  Zero _                     -> empty
-  Unit                       -> toNF r2
-  Or r11 r12                 -> toNF (Seq r11 r2)
+  Or r11 r12                 -> toNF (r11 <> r2)
                                 <|>
-                                toNF (Seq r12 r2)
+                                toNF (r12 <> r2)
   Star r1 shortest
     | shortest               -> toNF r2
                                 <|>
-                                toNF (Seq (plus' r1 True) r2)
-    | otherwise              -> toNF (Seq (plus' r1 False) r2) --longest match
+                                toNF (plus' r1 True  <> r2)
+    | otherwise              -> toNF (plus' r1 False <> r2) --longest match
                                 <|>
                                 toNF r2
-  Plus r11 b                 -> toNF (Seq r11 (Seq (star' r11 b) r2))
-  Diff r11 r12               -> toNF r1
+  Plus r11 b                 -> toNF (r11 <> star' r11 b <> r2)
+  Diff r11 r12               -> toNF r11
                                 >>=
-                                \ r' -> case r' of
-                                          Diff _ _ -> return (Seq r' r2)
-                                          _        -> toNF   (Seq r' r2)
-  Seq  r11 r12               -> toNF (Seq r11 (Seq r12 r2))
-  _                          -> return r0
+                                \ r' -> toREX ((r' `diff` r12) <> r2)
+  Seq  r11 r12               -> toNF (r11 <> r12 <> r2)
+  Syms _                     -> return r0
+  Dot                        -> return r0
+  Zero _                     -> empty
+  Unit                       -> toNF r2
+  BsubRE _                   -> return r0   -- must be simplified earlier
+  EsubRE                     -> return r0   --   "  "       "       "
+  _                          -> error $ "toNF: no NF found for " ++ showRegex 0 r0
+
+toNF (Zero _)                 = empty
+toNF r0@Dot                   = return r0
+toNF r0@Unit                  = return r0
+toNF r0@(Syms _cs)            = return r0
 
 toNF r  = error $ "toNF: no NF found for " ++ showRegex 0 r
 
-diff' :: RE -> RE -> RE
-diff' r1 (Zero _)     = r1
-diff' (Syms cs1) (Syms cs2) = syms (cs1 `diffCS` cs2)
-diff' Dot        (Syms cs2) = syms (compCS cs2)
-diff' (Syms cs1) Dot        = noMatch
-diff' Dot        Dot        = noMatch
-diff' r1 Unit
-  | not (nullable r1) = r1
-diff' r1 r2           = Diff r1 r2
+-- ----------------------------------------
+
+toREX :: RE -> REX RE
+toREX (Zero _) = empty
+toREX r        = return r
+
+splitBsubRE :: RE -> Maybe (Label, RE)
+splitBsubRE (BsubRE l)          = Just (l, Unit)
+splitBsubRE (Seq (BsubRE l) r2) = Just (l, r2)
+splitBsubRE (Seq  r1 r2)        = (\ (b, r1') -> (b, r1'  <>    r2))
+                                  <$>
+                                  splitBsubRE r1
+splitBsubRE (Diff r1 r2)        = (\ (b, r1') -> (b, r1' `diff` r2))
+                                  <$>
+                                  splitBsubRE r1
+splitBsubRE _ = Nothing
+
+-- search for a leading BsubRE
+-- success: normalise remaining re
+-- and insert label into open submatches
+beginSubRE :: SubMatches -> RE -> REX (SubMatches, RE)
+beginSubRE sm r =
+  maybe (return (sm, r))
+        (uncurry addSub)
+        (splitBsubRE r)
+  where
+    addSub l r1 = ((\ r' -> (sm', r')) <$> toNF r1)
+                  >>=
+                  uncurry beginSubRE    -- look for more starting submatches
+      where
+        sm' = sm {openSubs = (l, "") : openSubs sm}
+
+-- ----------------------------------------
+--
+-- smart constructors used in toNF
+
+seq' :: RE -> RE -> RE
+seq' r1@(Zero _)   _  = r1
+seq' _    r2@(Zero _) = r2
+seq' Unit          r2 = r2
+seq' r1          Unit = r1
+seq' (Seq r11 r12) r2 = seq' r11 (seq' r12 r2)
+seq' r1            r2 = Seq r1 r2
+
+diff :: RE -> RE -> RE
+diff r1         (Zero _)   = r1
+diff r1@(Zero _)      _    = r1
+diff Unit             r2
+  | nullable r2             = noMatch
+diff r1 Unit
+  | not (nullable r1)       = r1
+diff (Diff r11 r12)   r2   = r11 `diff` (r12 `alt` r2)
+diff (Syms cs1) (Syms cs2) = syms (cs1 `diffCS` cs2)
+diff Dot        (Syms cs2) = syms (compCS cs2)
+diff (Syms cs1) Dot        = noMatch
+diff r1 r2
+  | r1 == r2                = r1
+  | otherwise               = Diff r1 r2
+
+star'                    :: RE -> Bool -> RE
+star' (Zero _)       _  = unit                  -- {}* == ()
+star' r@Unit         _  = r                     -- ()* == ()
+star' (Star r1 _)    s  = star' r1 s
+star' (Plus r1 _)    s  = star' r1 s
+star' r              s
+  | nullable r          = star' (r `diff` Unit)  s
+  | otherwise           = Star r s
+
+plus'                   :: RE -> Bool -> RE
+plus' r@(Zero _)     _  = r                     -- {}+ == {}
+plus' r@Unit         _  = r                     -- ()+ == ()
+plus' (Star r1 _)    s  = star' r1 s            -- (r*)+ == r*
+plus' (Plus r1 _)    s  = plus' r1 s            -- (r+)+ == r+
+plus' r              s
+  | nullable r          = star' (r `diff` Unit) s
+  | otherwise           = Plus r s
 
 -- ------------------------------------------------------------
 --
--- smart constructors
+-- smart constructors for basic RE's
 
 zero :: ErrMsg -> RE
 zero = Zero
@@ -197,8 +270,9 @@ symRng lb ub = syms $ rangeCS lb ub
 -- --------------------
 
 subRE :: Label -> RE -> RE
-subRE = flip SubRE
+subRE l r = BsubRE l <> r <> EsubRE
 
+{-
 openSub :: RE -> Label -> RE
 openSub (Or r1 r2) l = openSub r1 l .|. openSub r2 l
 openSub r l = OpenSub r l ""
@@ -212,11 +286,12 @@ closedSub :: RE -> [(Label, String)] -> RE
 closedSub r@(Zero _)         _  = r
 closedSub (ClosedSub r1 ms1) ms = closedSub r1 (ms ++ ms1)
 closedSub r ms = ClosedSub r ms
-
+-}
 -- --------------------
 --
 -- smart constructor for sequence
 
+{-
 sequ                     :: RE -> RE -> RE
 sequ r1@(Zero _)  _      = r1                       -- {}.r  == {}
 sequ _ r2@(Zero _)       = r2                       -- r.{}  == {}
@@ -225,56 +300,32 @@ sequ r1   Unit           = r1                       -- r.()  == r
 sequ (Seq r1 r2) r3      = sequ r1 (sequ r2 r3)     -- assoc. of .
 sequ (ClosedSub r1 ms) r2= closedSub (sequ r1 r2) ms -- propagate submatches upwards
 sequ r1   r2             = Seq r1 r2
-
-instance Monoid RE where
-  mempty  = unit
-  mappend = sequ
-  mconcat = foldr sequ unit
-
--- <> is sequ(ence)
-
-word :: String -> RE
-word = foldr (\ a b -> sym a <> b) unit
+-}
 
 -- --------------------
 --
 -- smart constructor for * and +
 
-star                     :: RE -> RE
-star r                   = star' r False
+star            :: RE -> RE
+star r          = star' r False
 
-plus                     :: RE -> RE
-plus r                   = plus' r False
+plus            :: RE -> RE
+plus r          = plus' r False
 
 -- shortest match
-starSM                   :: RE -> RE
-starSM r                 = star' r False
+starSM          :: RE -> RE
+starSM r        = star' r False
 
-plusSM                   :: RE -> RE
-plusSM r                 = plus' r False
+plusSM          :: RE -> RE
+plusSM r        = plus' r False
 
-star'                    :: RE -> Bool -> RE
-star' (Zero _)       _  = unit                  -- {}* == ()
-star' r@Unit         _  = r                     -- ()* == ()
-star' (Star r1 _)    s  = star' r1 s
-star' (Plus r1 _)    s  = star' r1 s
-star' r              s
-  | nullable r          = star' (diff' r Unit)  s
-  | otherwise           = Star r s
-
-plus'                   :: RE -> Bool -> RE
-plus' r@(Zero _)     _  = r                     -- {}+ == {}
-plus' r@Unit         _  = r                     -- ()+ == ()
-plus' (Star r1 _)    s  = star' r1 s            -- (r*)+ == r*
-plus' (Plus r1 _)    s  = plus' r1 s            -- (r+)+ == r+
-plus' r              s
-  | nullable r          = star' (diff' r Unit) s
-  | otherwise           = Plus r s
+word            :: String -> RE
+word            = foldr (\ a b -> sym a <> b) unit
 
 -- --------------------
 --
 -- smart constructor for alternative
-
+{-
 infixr 2 .|.
 
 (.|.)                   :: RE -> RE -> RE
@@ -282,7 +333,7 @@ Zero _    .|. r2        = r2                 -- zero
 r1        .|. Zero _    = r1                 -- zero
 Or r1 r2  .|. r3        = r1 .|. (r2 .|. r3) -- associativity
 r1        .|.  r2       = Or r1 r2
-
+-}
 -- --------------------
 --
 -- smart constructor for intersection
@@ -315,17 +366,17 @@ alt r1 (Zero _)       = r1
 alt (Syms cs1) (Syms cs2) = syms (cs1 `unionCS` cs2)
 alt (Syms cs1) Dot        = Dot
 alt Dot        (Syms cs2) = Dot
-alt r1@(Star Dot _) r2  = r1
-alt r1 r2@(Star Dot _)  = r2
+alt r1@(Star Dot _) r2    = r1
+alt r1 r2@(Star Dot _)    = r2
 
-alt (Or r1 r2) r3  = alt r1 (alt r2 r3)
+alt (Or r1 r2) r3         = alt r1 (alt r2 r3)
                                         -- associativity
 alt r1 (Or r21 r22)
-    | r1 === r21         = alt r1 r22  -- idempotent
+    | r1 == r21         = alt r1 r22  -- idempotent
 --    | r1 > r21          = alt r21 (alt r1 r22)
                                         -- symmetry
 alt r1   r2
-    | r1 === r2          = r1            -- idempotent
+    | r1 == r2          = r1            -- idempotent
 --    | r1 > r2           = alt r2 r1   -- symmetry
     | otherwise         = Or r1 r2
 
@@ -342,28 +393,28 @@ isect (Isect r1 r2) r3  = isect r1 (isect r2 r3)
                                         -- associativity
 
 isect r1 (Isect r21 r22)
-    | r1 === r21         = isect r1 r22  -- idempotent
+    | r1 == r21         = isect r1 r22  -- idempotent
 --    | r1 > r21          = isect r21 (isect r1 r22)
                                         -- symmetry
 
 isect r1   r2
-    | r1 === r2          = r1            -- idempotent
+    | r1 == r2          = r1            -- idempotent
 --    | r1 > r2           = isect r2 r1   -- symmetry
     | otherwise         = Isect r1 r2
 
 -- --------------------
-
+{-
 diff                    :: RE -> RE -> RE
 diff r1@(Zero _) r2     = r1
 diff r1 (Zero _)        = r1
 diff r1   r2
     | r1 === r2         = noMatch
     | otherwise         = Diff r1 r2
-
+-}
 -- ------------------------------------------------------------
 --
 -- equivalence: used for itempotent op's:  a `op` a == a
-
+{-
 infix 4 ===
 
 (===) :: RE -> RE -> Bool
@@ -378,7 +429,7 @@ Isect r1 s1 === Isect r2 s2 = r1 === r2 && s1 === s2
 Diff  r1 s1 === Diff r2 s2  = r1 === r2 && s1 === s2
 SubRE r1 l1 === SubRE r2 l2 = r1 === r2 && l1 ==  l2
 _           === _           = False
-
+-}
 -- ------------------------------------------------------------
 --
 -- cases sorted by frequency of operators
@@ -403,10 +454,8 @@ nullable (Isect r1 r2)  = nullable r1
 nullable (Diff  r1 r2)  = nullable r1
                           &&
                           not (nullable r2)
-
-nullable (SubRE   r _)   = nullable r
-nullable (OpenSub r _ _) = nullable r
-nullable (ClosedSub r _) = nullable r
+nullable (BsubRE _)     = True
+nullable  EsubRE        = True
 
 -- ------------------------------------------------------------
 
@@ -423,43 +472,35 @@ delta (Syms cs) c
   | otherwise            = noMatch
 
 delta r0@(Star r s) c
-  | s                    = delta r c <> (unit      .|. plus' r s)
-  | otherwise            = delta r c <> (plus' r s .|. unit  )
+  | s                    = delta r c <> (unit      `alt` plus' r s)
+  | otherwise            = delta r c <> (plus' r s `alt` unit  )
 
 delta r0@(Plus r s) c
-  | s                    = delta (r <> (unit .|. r0  )) c
-  | otherwise            = delta (r <> (r0   .|. unit)) c
+  | s                    = delta (r <> (unit `alt` r0  )) c
+  | otherwise            = delta (r <> (r0   `alt` unit)) c
 
 delta (Seq r1 r2) c
-  | nullable r1          = dr1 .|. dr2
+  | nullable r1          = dr1 `alt` dr2
   | otherwise            = dr1
                            where
                              dr1 = delta r1 c <> r2
                              dr2 = delta r2 c
 
 delta (Or r1 r2) c       = delta r1 c
-                           .|.
+                           `alt`
                            delta r2 c
 
 delta (Isect r1 r2) c    = delta r1 c
-                           ` isect`
+                           `isect`
                            delta r2 c
 
 delta (Diff r1 r2) c     = delta r1 c
                            `diff`
                            delta r2 c
 
-delta (SubRE r l) c      = delta (openSub r l) c       -- a submatch starts
+delta (BsubRE _) c       = noMatch
 
-delta (OpenSub r l s) c
-  | nullable r           = closedSub unit [(l, s)]     -- complete match found
-                           .|.                         -- or
-                           r'                          -- continue parse
-  | otherwise            = r'
-  where
-      r' = contSub (delta r c) l (c : s)
-
-delta (ClosedSub r ms) c = closedSub (delta r c) ms
+delta  EsubRE    c       = noMatch
 
 -- ------------------------------------------------------------
 
@@ -491,9 +532,8 @@ prio (Seq _ _)   = 2
 prio (Isect _ _) = 3
 prio (Diff _ _)  = 4
 prio (Or _ _)    = 5
-prio (SubRE _ _) = 10
-prio (OpenSub _ _ _) = 10
-prio (ClosedSub _ _) = 10
+prio (BsubRE _)  = 0
+prio  EsubRE     = 0
 
 showRegex       :: Int -> RE -> String
 showRegex p r
@@ -528,6 +568,9 @@ showRegex p r
     showRegex' (Diff  r1 r2) = showRegex pr r1
                                ++ "-" ++
                                showRegex pr r2
+    showRegex' (BsubRE l)    = "(" ++ l ++ ":"
+    showRegex'  EsubRE       = ")"
+{-
     showRegex' (SubRE r1 l)  = l ++ ":" ++
                                showRegex pr r1
     showRegex' (OpenSub r1 l s)
@@ -536,7 +579,7 @@ showRegex p r
     showRegex' (ClosedSub r1 ms)
                              = show ms ++ ":" ++
                                showRegex pr r1
-
+-}
     showCS cs
       | cs == compCS (stringCS "\n\r")
                              = "."
