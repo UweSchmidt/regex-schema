@@ -11,7 +11,7 @@ import Prelude hiding (seq)
 
 -- | a few simple RegExps
 
-a1, b1, aStar, aOrb, ab, a2 :: RegEx
+a1, b1, aStar, aOrb, ab, a2 :: RE
 
 a1      = sym 'a'
 b1      = sym 'b'
@@ -20,20 +20,20 @@ aOrb    = alt a1 b1
 ab      = Seq a1 b1
 a2      = Seq a1 a1
 
-aOrbStar, aStarOrbStar, allWords, allMinusAStar :: RegEx
+aOrbStar, aStarOrbStar, allWords, allMinusAStar :: RE
 
 aOrbStar        = star aOrb
 aStarOrbStar    = star (alt aStar b1)
 allWords        = star Dot
 allMinusAStar   = diff allWords aStar
 
-repN            :: Int -> RegEx -> RegEx
+repN            :: Int -> RE -> RE
 repN n          = foldr (<>) unit . replicate n
 
-worstCase       :: Int -> RegEx
+worstCase       :: Int -> RE
 worstCase n     = repN n (alt a1 unit) <> repN n a1
 
-ccomment        :: RegEx
+ccomment        :: RE
 ccomment
     = mconcat [ openCmt
               , all `diff` mconcat [all,closeCmt,all]
@@ -44,7 +44,7 @@ ccomment
     openCmt     = word "/*"
     closeCmt    = word "*/"
 
-htmlcomment        :: RegEx
+htmlcomment        :: RE
 htmlcomment
     = mconcat [ openCmt
               , all `diff` mconcat [all,closeCmt,all]
@@ -55,7 +55,7 @@ htmlcomment
     openCmt     = word "<!--"
     closeCmt    = word "-->"
 
-xmlcomment        :: RegEx
+xmlcomment        :: RE
 xmlcomment
     = mconcat [ openCmt
               , allWords `diff` mconcat [allWords, noCmt, allWords]
@@ -67,7 +67,7 @@ xmlcomment
     closeCmt    = word "-->"
     noCmt       = word "--"
 
-sub1 :: RegEx
+sub1 :: RE
 sub1 = mconcat [ sym 'a'
                , subRE "1" $ plus $ sym 'i'
                , sym 'z'
