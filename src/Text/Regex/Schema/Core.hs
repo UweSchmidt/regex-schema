@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+
 module Text.Regex.Schema.Core
 where
 
@@ -61,7 +62,7 @@ instance Monad REX where
                          concatMap (\ (REX cxf') -> cxf' cx) ys
 
 instance MonadPlus REX where
-  mzero         = REX $ \_cx -> []
+  mzero         = REX $ const []
 
   REX cxf1 `mplus` REX cxf2
                 = REX $ \ cx -> cxf1 cx ++ cxf2 cx
@@ -86,7 +87,7 @@ instance Functor REX where
                           in map f xs
 
 runREX :: REX a -> Context -> [a]
-runREX (REX cxf) cx = cxf cx
+runREX (REX cxf) = cxf
 
 -- ----------------------------------------
 
@@ -96,111 +97,77 @@ data SubMatches = SM { closedSubs :: [(Label, String)] -- TODO: remove doublicat
 
 type RENF = (RE, SubMatches)
 
-toNF :: SubMatches -> RE -> REX RENF
-toNF sm re = (\ r -> (r, sm)) <$> nf re
-  where
-    nf (Zero _)                 = empty
-    nf r@Dot                    = return r
-    nf r@Unit                   = return r
-    nf r@(Syms _cs)             = return r
+toNF' :: SubMatches -> RE -> REX (RE, SubMatches)
+toNF' sm re = (\ r -> (r, sm)) <$> toNF re
 
-    nf (Or r1 r2)               = nf r1
-                                  <|>
-                                  nf r2
-    nf (Star r shortest)
-      | shortest                = return Unit
-                                  <|>
-                                  nf (Plus r True)
-      | otherwise               = nf (Plus r False)  -- longest match
-                                  <|>
-                                  return Unit
+toNF :: RE -> REX RE
+toNF (Zero _)                 = empty
+toNF r0@Dot                   = return r0
+toNF r0@Unit                  = return r0
+toNF r0@(Syms _cs)            = return r0
 
-    nf (Plus r b)               = nf (Seq r (Star r b))
+toNF (Or r1 r2)               = toNF r1
+                                <|>
+                                toNF r2
 
-    nf r@(Seq (Syms _) _)       = return r
-    nf (Seq (Zero _) _)         = empty
-    nf (Seq  Unit    r2)        = nf r2
-    nf (Seq (Or  r1 r2) r3)     = nf (Seq r1 r3)
-                                  <|>
-                                  nf (Seq r2 r3)
+toNF (Star r shortest)
+  | (Star r1 s1) <- r         = toNF (star' (plus' r1 s1) shortest)
+  | shortest                  = return Unit
+                                <|>
+                                toNF (plus' r True)
+  | otherwise                 = toNF (plus' r False)  -- longest match
+                                <|>
+                                return Unit
 
-    nf (Seq (Star r1 shortest) r2)
-      | shortest                = nf r2
-                                  <|>
-                                  nf (Seq (Plus r1 True) r2)
-      | otherwise               = nf (Seq (Plus r1 False) r2) --longest match
-                                  <|>
-                                  nf r2
+toNF (Plus r b)               = toNF (Seq r (star' r b))
 
-    nf (Seq (Plus r1 b) r2)     = nf (Seq r1 (Seq (Star r1 b) r2))
-    nf (Seq (Seq r1 r2) r3)     = nf (Seq r1 (Seq r2 r3))
+toNF (Diff r1 (Zero _))       = toNF r1
+toNF (Diff r1 Unit)
+  | not (nullable r1)         = toNF r1
+toNF r0@(Diff r1 r2)          = case r1 of
+  Zero _                     -> empty
+  Unit
+    | nullable r2            -> empty
+  Diff r11 r12               -> toNF (diff' r11 (alt r12 r2))
+  Or   _   _                 -> toNF r1
+                                >>=
+                                \ r' -> toNF (diff' r' r2)
+  _                          -> return r0
 
-    nf r  = error $ "toNF: no NF found for " ++ showRegex 0 r
+toNF r0@(Seq r1 r2)          = case r1 of
+  Syms _                     -> return r0
+  Zero _                     -> empty
+  Unit                       -> toNF r2
+  Or r11 r12                 -> toNF (Seq r11 r2)
+                                <|>
+                                toNF (Seq r12 r2)
+  Star r1 shortest
+    | shortest               -> toNF r2
+                                <|>
+                                toNF (Seq (plus' r1 True) r2)
+    | otherwise              -> toNF (Seq (plus' r1 False) r2) --longest match
+                                <|>
+                                toNF r2
+  Plus r11 b                 -> toNF (Seq r11 (Seq (star' r11 b) r2))
+  Diff r11 r12               -> toNF r1
+                                >>=
+                                \ r' -> case r' of
+                                          Diff _ _ -> return (Seq r' r2)
+                                          _        -> toNF   (Seq r' r2)
+  Seq  r11 r12               -> toNF (Seq r11 (Seq r12 r2))
+  _                          -> return r0
 
-{-
-toNF Unit                   = return TUnit
-toNF Dot                    = return $ TCS allCS Unit
-toNF (Syms cs)              = tcs cs Unit
+toNF r  = error $ "toNF: no NF found for " ++ showRegex 0 r
 
-toNF (Seq (Zero _) r2)      = mempty
-toNF (Seq Unit r2)          = toNF r2
-toNF (Seq (Syms cs) r2)     = return (TCS cs r2)
-toNF (Seq (Seq r11 r12) r2) = toNF (Seq r11 (Seq r12 r2))
-toNF (Seq (Or  r11 r12) r2) = toNF (Seq r11 r2) <> toNF (Seq r12 r2)
-toNF (Seq (SubRE r1 l1) r2) = tSub (toNF r1) l1 "" r2
-
-toNF (Or r1 r2)             = toNF r1 <> toNF r2
-
-toNF (Star r False)         = toNF (Plus r False) <> return TUnit
-toNF (Star r True)          = return TUnit <> toNF (Plus r False)
-toNF r0@(Plus r b)          = toNF $ Seq r (Star r b)
-
-toNF (SubRE r l)            = tSub (toNF r) l "" Unit
-
-toNF r                      = error $ "No NF for " ++ show r
--}
-
-
-
-{-
-data Term' m = TUnit
-          | TCS CharSet RE        -- charset is not empty
-          | TSub (m (Term' m)) Label String RE
-
-nf2nf' :: NF -> NF'
-nf2nf' = N3 . map ((\ x -> (x, [])) . t2t')
-  where
-    t2t' (TSub ts l s r) = TSub (nf2nf' ts) l s r
-    t2t' TUnit           = TUnit
-    t2t' (TCS cs re)     = TCS cs re
-
-nf'2nf :: NF' -> NF
-nf'2nf (N3 ts) = map (t'2t . fst) ts
-  where
-    t'2t TUnit = TUnit
-    t'2t (TCS cs re) = TCS cs re
-    t'2t (TSub ts' l s r) = TSub (nf'2nf ts') l s r
-
-
-tcs :: CharSet -> RE -> NF
-tcs cs r
-  | nullCS cs = mempty
-  | otherwise = return $ TCS cs r
-
-tSub :: NF -> Label -> String -> RE -> NF
-tSub [] _ _ _ = []
-tSub nf l s r = return $ TSub nf l s r
-
-nullNF :: NF -> Bool
-nullNF = any nullT
-  where
-    nullT (TCS _ _)      = False
-    nullT (TUnit)        = True
-    nullT (TSub nf _ _ r) = nullNF nf && nullable r
-
-nullNF' :: NF' -> Bool
-nullNF' = nullNF . nf'2nf
--}
+diff' :: RE -> RE -> RE
+diff' r1 (Zero _)     = r1
+diff' (Syms cs1) (Syms cs2) = syms (cs1 `diffCS` cs2)
+diff' Dot        (Syms cs2) = syms (compCS cs2)
+diff' (Syms cs1) Dot        = noMatch
+diff' Dot        Dot        = noMatch
+diff' r1 Unit
+  | not (nullable r1) = r1
+diff' r1 r2           = Diff r1 r2
 
 -- ------------------------------------------------------------
 --
@@ -289,29 +256,20 @@ plusSM r                 = plus' r False
 star'                    :: RE -> Bool -> RE
 star' (Zero _)       _  = unit                  -- {}* == ()
 star' r@Unit         _  = r                     -- ()* == ()
-
-{- not neccesary during delta eval
-star' r@(Star _ s1)  s
-  | s1 == s             = r                     -- (r*)* == r*
-star' r@(Plus r1 s1) s
-  | s1 == s             = Star r1 s1            -- (r+)* == r*
--}
-
-star' r              s  = Star r  s
-
+star' (Star r1 _)    s  = star' r1 s
+star' (Plus r1 _)    s  = star' r1 s
+star' r              s
+  | nullable r          = star' (diff' r Unit)  s
+  | otherwise           = Star r s
 
 plus'                   :: RE -> Bool -> RE
 plus' r@(Zero _)     _  = r                     -- {}+ == {}
 plus' r@Unit         _  = r                     -- ()+ == ()
-
-{- not neccesary during delta eval
-plus' r@(Star r1 s1) s
-  | s1 == s             = r                     -- (r*)+ == r*
-plus' r@(Plus _  s1) s
-  | s1 == s             = r                     -- (r+)+ == r+
--}
-
-plus' r              s  = Plus r s
+plus' (Star r1 _)    s  = star' r1 s            -- (r*)+ == r*
+plus' (Plus r1 _)    s  = plus' r1 s            -- (r+)+ == r+
+plus' r              s
+  | nullable r          = star' (diff' r Unit) s
+  | otherwise           = Plus r s
 
 -- --------------------
 --
@@ -354,6 +312,9 @@ alt                   :: RE -> RE -> RE
 alt (Zero _) r2       = r2
 alt r1 (Zero _)       = r1
 
+alt (Syms cs1) (Syms cs2) = syms (cs1 `unionCS` cs2)
+alt (Syms cs1) Dot        = Dot
+alt Dot        (Syms cs2) = Dot
 alt r1@(Star Dot _) r2  = r1
 alt r1 r2@(Star Dot _)  = r2
 
