@@ -171,31 +171,67 @@ toREX :: RE -> REX RE
 toREX (Zero _) = empty
 toREX r        = return r
 
-splitBsubRE :: RE -> Maybe (Label, RE)
-splitBsubRE (BsubRE l)          = Just (l, Unit)
-splitBsubRE (Seq (BsubRE l) r2) = Just (l, r2)
-splitBsubRE (Seq  r1 r2)        = (\ (b, r1') -> (b, r1'  <>    r2))
-                                  <$>
-                                  splitBsubRE r1
-splitBsubRE (Diff r1 r2)        = (\ (b, r1') -> (b, r1' `diff` r2))
-                                  <$>
-                                  splitBsubRE r1
-splitBsubRE _ = Nothing
+-- ----------------------------------------
+--
+-- search for a leading BsubRE's
+-- and insertion of label into open submatches
 
--- search for a leading BsubRE
--- success: normalise remaining re
--- and insert label into open submatches
-beginSubRE :: SubMatches -> RE -> REX (SubMatches, RE)
-beginSubRE sm r =
-  maybe (return (sm, r))
-        (uncurry addSub)
-        (splitBsubRE r)
+openSubRE :: Tr (SubMatches, RE)
+openSubRE =
+  evalSubRE isBsub addSub
   where
-    addSub l r1 = ((\ r' -> (sm', r')) <$> toNF r1)
-                  >>=
-                  uncurry beginSubRE    -- look for more starting submatches
+    isBsub (BsubRE _) = True
+    isBsub _          = False
+
+    addSub sm (BsubRE l) = sm {openSubs = (l, "") : openSubs sm}
+
+openSubREs :: Tr (SubMatches, RE)
+openSubREs = repeatTr openSubRE
+
+closeSubRE :: Tr (SubMatches, RE)
+closeSubRE =
+  evalSubRE isEsub closeSub
+  where
+    isEsub EsubRE = True
+    isEsub _      = False
+
+    closeSub sm _ =  SM { closedSubs = cm'
+                        , openSubs   = om'
+                        }
       where
-        sm' = sm {openSubs = (l, "") : openSubs sm}
+        (l, s) : om' = openSubs sm
+        cm'          = (l, s) : closedSubs sm
+
+-- evaluate action for a leading pseudo regex (BsubRE, EsubRE, ...)
+-- and remove it from the re
+evalSubRE :: (RE -> Bool) ->
+             (SubMatches -> RE -> SubMatches) ->
+             Tr (SubMatches, RE)
+evalSubRE p sub e@(sm, r) =
+  case splitFstRE p r of
+    Nothing       -> return (noChange, e)
+    Just (r1, r2) -> do r' <- toNF r2
+                        return (hasChanged, (sub sm r1, r'))
+
+
+-- split the leftmost sub regex (BsubRE, EsubRE, ...) from a regex
+-- type of re is determined by predicate p
+
+splitFstRE :: (RE -> Bool) -> RE -> Maybe (RE, RE)
+splitFstRE p = go
+  where
+    go r
+      | True <- p r        = Just (r, Unit)
+    go (Seq r1 r2)
+      | True <- p r1       = Just (r1, r2)
+    go (Seq  r1 r2)        = (\ (b, r1') -> (b, r1'  <>    r2))
+                             <$>
+                             go r1
+    go (Diff r1 r2)        = (\ (b, r1') -> (b, r1' `diff` r2))
+                             <$>
+                             go r1
+    go _                   = Nothing
+
 
 -- ----------------------------------------
 --
