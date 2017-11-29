@@ -604,3 +604,51 @@ showRegex p r
                                    | otherwise   = "&#" ++ show (fromEnum x) ++ ";"
 
 -- ------------------------------------------------------------
+
+
+type Tr a = a -> REX (Changed, a)
+
+type Changed = Bool
+
+hasChanged :: Bool
+hasChanged = True
+
+noChange :: Bool
+noChange = False
+
+runTr :: Tr a -> a -> REX a
+runTr f x = snd <$> f x
+
+idTr :: Tr a
+idTr = \ x -> return (noChange, x)
+
+andThen :: Tr a -> Tr a -> Tr a
+andThen f g x = do
+  (changed1, y) <- f x
+  (changed2, z) <- g y
+  return (changed1 || changed2, z)
+
+onSuccess :: Tr a -> Tr a -> Tr a
+onSuccess f g x = do
+  res1@(changed1, y) <- f x
+  if changed1
+    then
+    do
+      (_changed2, z) <- g y
+      return (hasChanged, z)
+    else
+      return res1
+
+orElse :: Tr a -> Tr a -> Tr a
+orElse f g x = do
+  res1@(changed1, _y) <- f x
+  if changed1
+    then
+      return res1
+    else
+      g x
+
+repeatTr :: Tr a -> Tr a
+repeatTr f = f `onSuccess` repeatTr f
+
+-- ------------------------------------------------------------
