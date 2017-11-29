@@ -34,9 +34,9 @@ data RE
 --  | SubRE     RE Label  -- submatch
 --  | OpenSub   RE Label String  -- TODO: generalize -- open subexpr with string and len of submatch
 --  | ClosedSub RE [(Label, String)]  -- TODO: generalize -- list of completely parsed submatches
-  deriving (Eq, Ord, Read, Show)
+  deriving (Eq, Ord, Read) -- , Show)
 
--- instance Show RE where  show = showRegex 0
+instance Show RE where  show = showRegex 0
 
 type ErrMsg = String
 type Label  = String
@@ -156,12 +156,14 @@ toNF r0@(Seq r1 r2)          = case r1 of
   Unit                       -> toNF r2
   BsubRE _                   -> return r0   -- must be simplified earlier
   EsubRE                     -> return r0   --   "  "       "       "
-  _                          -> error $ "toNF: no NF found for " ++ showRegex 0 r0
+  _                          -> return r0
 
 toNF (Zero _)                 = empty
 toNF r0@Dot                   = return r0
 toNF r0@Unit                  = return r0
 toNF r0@(Syms _cs)            = return r0
+toNF r0@(BsubRE _)            = return r0
+toNF r0@(EsubRE)              = return r0
 
 toNF r  = error $ "toNF: no NF found for " ++ showRegex 0 r
 
@@ -170,68 +172,6 @@ toNF r  = error $ "toNF: no NF found for " ++ showRegex 0 r
 toREX :: RE -> REX RE
 toREX (Zero _) = empty
 toREX r        = return r
-
--- ----------------------------------------
---
--- search for a leading BsubRE's
--- and insertion of label into open submatches
-
-openSubRE :: Tr (SubMatches, RE)
-openSubRE =
-  evalSubRE isBsub addSub
-  where
-    isBsub (BsubRE _) = True
-    isBsub _          = False
-
-    addSub sm (BsubRE l) = sm {openSubs = (l, "") : openSubs sm}
-
-openSubREs :: Tr (SubMatches, RE)
-openSubREs = repeatTr openSubRE
-
-closeSubRE :: Tr (SubMatches, RE)
-closeSubRE =
-  evalSubRE isEsub closeSub
-  where
-    isEsub EsubRE = True
-    isEsub _      = False
-
-    closeSub sm _ =  SM { closedSubs = cm'
-                        , openSubs   = om'
-                        }
-      where
-        (l, s) : om' = openSubs sm
-        cm'          = (l, s) : closedSubs sm
-
--- evaluate action for a leading pseudo regex (BsubRE, EsubRE, ...)
--- and remove it from the re
-evalSubRE :: (RE -> Bool) ->
-             (SubMatches -> RE -> SubMatches) ->
-             Tr (SubMatches, RE)
-evalSubRE p sub e@(sm, r) =
-  case splitFstRE p r of
-    Nothing       -> return (noChange, e)
-    Just (r1, r2) -> do r' <- toNF r2
-                        return (hasChanged, (sub sm r1, r'))
-
-
--- split the leftmost sub regex (BsubRE, EsubRE, ...) from a regex
--- type of re is determined by predicate p
-
-splitFstRE :: (RE -> Bool) -> RE -> Maybe (RE, RE)
-splitFstRE p = go
-  where
-    go r
-      | True <- p r        = Just (r, Unit)
-    go (Seq r1 r2)
-      | True <- p r1       = Just (r1, r2)
-    go (Seq  r1 r2)        = (\ (b, r1') -> (b, r1'  <>    r2))
-                             <$>
-                             go r1
-    go (Diff r1 r2)        = (\ (b, r1') -> (b, r1' `diff` r2))
-                             <$>
-                             go r1
-    go _                   = Nothing
-
 
 -- ----------------------------------------
 --
@@ -350,10 +290,10 @@ plus r          = plus' r False
 
 -- shortest match
 starSM          :: RE -> RE
-starSM r        = star' r False
+starSM r        = star' r True
 
 plusSM          :: RE -> RE
-plusSM r        = plus' r False
+plusSM r        = plus' r True
 
 word            :: String -> RE
 word            = foldr (\ a b -> sym a <> b) unit
@@ -639,8 +579,91 @@ showRegex p r
                                                  = x:""
                                    | otherwise   = "&#" ++ show (fromEnum x) ++ ";"
 
--- ------------------------------------------------------------
+-- ----------------------------------------
+--
+-- remove submatch ops BsubRE and EsubRE and
+-- add submatches to submatch context
 
+deriveSubREs :: Tr (SubMatches, RE)
+deriveSubREs = repeatTr $ openSubREs `andThen` closeSubREs
+
+openSubREs :: Tr (SubMatches, RE)
+openSubREs =
+  repeatTr $ evalSubRE isBsub addSub
+  where
+    isBsub (BsubRE _)    = True
+    isBsub _             = False
+
+    addSub sm (BsubRE l) = sm {openSubs = (l, "") : openSubs sm}
+    addSub _  r          = error $ "openSubRE: illegal RE: " ++ show r
+
+closeSubREs :: Tr (SubMatches, RE)
+closeSubREs =
+  repeatTr $ evalSubRE isEsub closeSub
+  where
+    isEsub EsubRE      = True
+    isEsub _           = False
+
+    closeSub sm EsubRE =  SM { closedSubs = cm'
+                             , openSubs   = om'
+                             }
+      where
+        (l, s) : om'   = openSubs sm
+        cm'            = (l, s) : closedSubs sm
+    closeSub sm r      = error $ "closeSubRE: illegal RE: " ++ show r
+
+-- evaluate action for a leading pseudo regex (BsubRE, EsubRE, ...)
+-- and remove it from the re
+evalSubRE :: (RE -> Bool) ->
+             (SubMatches -> RE -> SubMatches) ->
+             Tr (SubMatches, RE)
+evalSubRE p sub e@(sm, r) =
+  case splitFstRE p r of
+    Nothing       -> return (noChange, e)
+    Just (r1, r2) -> do r' <- toNF r2
+                        return (hasChanged, (sub sm r1, r'))
+
+
+-- split the leftmost sub regex (BsubRE, EsubRE, ...) from a regex
+-- type of re is determined by predicate p
+--
+-- applied on normalized REs,
+-- only Seq and Diff nodes are descended
+-- used to get the leftmost primitive RE or pseude RE for submatches
+--
+-- must be extended when further logical ops, e.g. intersection, are added
+
+splitFstRE :: (RE -> Bool) -> RE -> Maybe (RE, RE)
+splitFstRE p = go
+  where
+    go r
+      | p r         = Just (r, Unit)
+
+    go (Seq r1 r2)
+      | p r1        = Just (r1, r2)
+
+    go (Seq  r1 r2) = (\ (b, r1') -> (b, r1'  <>    r2))
+                      <$>
+                      go r1
+
+    go (Diff r1 r2) = (\ (b, r1') -> (b, r1' `diff` r2))
+                      <$>
+                      go r1
+
+    go _            = Nothing
+
+-- ------------------------------------------------------------
+--
+-- expression transformation combinators
+--
+-- transformations run in the REX monad,
+-- the results are augmented with a boolean indicating
+-- whether a transformation step has been applied with success
+--
+-- expressions can even be deleted by use of mzero from Alternative
+-- within the tr-functions
+--
+-- currently (only) used in evaluating submatch RE's
 
 type Tr a = a -> REX (Changed, a)
 
@@ -652,17 +675,26 @@ hasChanged = True
 noChange :: Bool
 noChange = False
 
+-- throw away transformation success flag
 runTr :: Tr a -> a -> REX a
 runTr f x = snd <$> f x
 
+-- the identity transformation
 idTr :: Tr a
 idTr = \ x -> return (noChange, x)
+
+-- try 2 transformations in a sequence
+-- 2. transformation is always tried independently
+-- of success in the 1. transformation
 
 andThen :: Tr a -> Tr a -> Tr a
 andThen f g x = do
   (changed1, y) <- f x
   (changed2, z) <- g y
   return (changed1 || changed2, z)
+
+-- try a 1. transformation, only when applied
+-- with success, apply 2. transformation
 
 onSuccess :: Tr a -> Tr a -> Tr a
 onSuccess f g x = do
@@ -675,6 +707,9 @@ onSuccess f g x = do
     else
       return res1
 
+-- try 1. transformation, only if no success
+-- try 2. transformation on input x
+
 orElse :: Tr a -> Tr a -> Tr a
 orElse f g x = do
   res1@(changed1, _y) <- f x
@@ -684,6 +719,7 @@ orElse f g x = do
     else
       g x
 
+-- apply a transformation until nothing changes anymore
 repeatTr :: Tr a -> Tr a
 repeatTr f = f `onSuccess` repeatTr f
 

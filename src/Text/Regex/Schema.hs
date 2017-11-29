@@ -141,3 +141,12 @@ testNF2 :: RE -> [String]
 testNF2 r = map (showRegex 99) $ flip runREX mempty $ toNF r >>= toNF
 
 run = flip runREX mempty
+
+sb1, sbe, sbf :: RE
+
+sb1 = subRE "yyy" ((subRE "xxx" $ sym 'a' `alt` (plus $ sym 'b')) <> sym 'z')
+
+sbe = subRE "eee" (star' (sym 'e') True)
+sbf = subRE "fff" (star' (sym 'f') True)
+
+derive1 r = run $ (runTr deriveSubREs) (emptySubMatches, r)
