@@ -146,7 +146,13 @@ sb1, sbe, sbf :: RE
 
 sb1 = subRE "yyy" ((subRE "xxx" $ sym 'a' `alt` (plus $ sym 'b')) <> sym 'z')
 
-sbe = subRE "eee" (star' (sym 'e') True)
-sbf = subRE "fff" (star' (sym 'f') True)
+estar = star' (sym 'e') True
+fstar = star' (sym 'f') False
 
-derive1 r = run $ (runTr deriveSubREs) (emptySubMatches, r)
+sbe = subRE "eee" estar
+sbf = subRE "fff" fstar
+
+sbs = sbe `diff` sbf
+
+
+derive1 r = run $ execTrRex $ deriveSubREs (emptySubMatches, r)

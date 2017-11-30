@@ -8,11 +8,13 @@ module Text.Regex.Schema.Core
 where
 
 import Control.Applicative
+import Control.Arrow (first, second)
 import Control.Monad
 import Control.Monad.Reader
+import Control.Monad.Writer
 
 import Data.Set.CharSet
-import Data.Monoid (Monoid(..), (<>))
+import Data.Monoid (Monoid(..), (<>), Any(..))
 
 import Text.Regex.Schema.StringLike
 
@@ -112,7 +114,7 @@ emptySubMatches = SM [] []
 type RENF = (SubMatches, RE)
 
 toNF' :: SubMatches -> RE -> REX (SubMatches, RE)
-toNF' sm re = (\ r -> (sm, r)) <$> toNF re
+toNF' sm re = (sm,) <$> toNF re
 
 toNF :: RE -> REX RE
 toNF (Or r1 r2)               = toNF r1
@@ -132,7 +134,7 @@ toNF (Plus r b)               = toNF (r <> (star' r b))
 
 toNF r0@(Diff r1 r2)          = toNF r1
                                 >>=
-                                \ r' -> toREX (r' `diff` r2)
+                                \ r' -> toREX (r' `diff'` r2)
 
 toNF r0@(Seq r1 r2)          = case r1 of
   Or r11 r12                 -> toNF (r11 <> r2)
@@ -148,7 +150,7 @@ toNF r0@(Seq r1 r2)          = case r1 of
   Plus r11 b                 -> toNF (r11 <> star' r11 b <> r2)
   Diff r11 r12               -> toNF r11
                                 >>=
-                                \ r' -> toREX ((r' `diff` r12) <> r2)
+                                \ r' -> toREX ((r' `diff'` r12) <> r2)
   Seq  r11 r12               -> toNF (r11 <> r12 <> r2)
   Syms _                     -> return r0
   Dot                        -> return r0
@@ -177,28 +179,44 @@ toREX r        = return r
 --
 -- smart constructors used in toNF
 
-seq' :: RE -> RE -> RE
-seq' r1@(Zero _)   _  = r1
-seq' _    r2@(Zero _) = r2
-seq' Unit          r2 = r2
-seq' r1          Unit = r1
-seq' (Seq r11 r12) r2 = seq' r11 (seq' r12 r2)
-seq' r1            r2 = Seq r1 r2
+seq'                    :: RE -> RE -> RE
+seq' r1@(Zero _)   _    = r1
+seq' _    r2@(Zero _)   = r2
+seq' Unit          r2   = r2
+seq' r1          Unit   = r1
+seq' (Seq r11 r12) r2   = seq' r11 (seq' r12 r2)
+seq' r1            r2   = Seq r1 r2
 
-diff :: RE -> RE -> RE
-diff r1         (Zero _)   = r1
-diff r1@(Zero _)      _    = r1
-diff Unit             r2
-  | nullable r2             = noMatch
-diff r1 Unit
-  | not (nullable r1)       = r1
-diff (Diff r11 r12)   r2   = r11 `diff` (r12 `alt` r2)
-diff (Syms cs1) (Syms cs2) = syms (cs1 `diffCS` cs2)
-diff Dot        (Syms cs2) = syms (compCS cs2)
-diff (Syms cs1) Dot        = noMatch
-diff r1 r2
-  | r1 == r2                = r1
-  | otherwise               = Diff r1 r2
+
+alt'                    :: RE -> RE -> RE
+alt' (Zero _) r2        = r2
+alt' r1 (Zero _)        = r1
+alt' (Syms cs1) (Syms cs2)
+                        = syms (cs1 `unionCS` cs2)
+alt' (Syms cs1) Dot     = Dot
+alt' Dot     (Syms cs2) = Dot
+alt' (Or r1 r2) r3      = alt' r1 (alt' r2 r3) -- associativity
+alt' r1 r2              = Or r1 r2
+
+-- --------------------
+
+diff'                    :: RE -> RE -> RE
+diff' r1        (Zero _) = r1
+diff' r1@(Zero _)      _ = r1
+diff' Unit            r2
+  | nullable r2         = noMatch
+diff' r1 Unit
+  | not (nullable r1)   = r1
+diff' (Diff r11 r12) r2  = r11 `diff'` (r12 `alt'` r2)
+diff' (Syms cs1) (Syms cs2)
+                        = syms (cs1 `diffCS` cs2)
+diff' Dot     (Syms cs2) = syms (compCS cs2)
+diff' (Syms cs1) Dot     = noMatch
+diff' r1 r2
+  | r1 == r2            = r1
+  | otherwise           = Diff r1 r2
+
+-- --------------------
 
 star'                    :: RE -> Bool -> RE
 star' (Zero _)       _  = unit                  -- {}* == ()
@@ -206,7 +224,7 @@ star' r@Unit         _  = r                     -- ()* == ()
 star' (Star r1 _)    s  = star' r1 s
 star' (Plus r1 _)    s  = star' r1 s
 star' r              s
-  | nullable r          = star' (r `diff` Unit)  s
+  | nullable r          = star' (r `diff'` Unit)  s
   | otherwise           = Star r s
 
 plus'                   :: RE -> Bool -> RE
@@ -215,11 +233,14 @@ plus' r@Unit         _  = r                     -- ()+ == ()
 plus' (Star r1 _)    s  = star' r1 s            -- (r*)+ == r*
 plus' (Plus r1 _)    s  = plus' r1 s            -- (r+)+ == r+
 plus' r              s
-  | nullable r          = star' (r `diff` Unit) s
+  | nullable r          = star' (r `diff'` Unit) s
   | otherwise           = Plus r s
 
 -- ------------------------------------------------------------
 --
+-- exported smart constructor
+
+
 -- smart constructors for basic RE's
 
 zero :: ErrMsg -> RE
@@ -243,43 +264,6 @@ sym = syms . singleCS
 symRng :: Char -> Char -> RE
 symRng lb ub = syms $ rangeCS lb ub
 
--- --------------------
-
-subRE :: Label -> RE -> RE
-subRE l r = BsubRE l <> r <> EsubRE
-
-{-
-openSub :: RE -> Label -> RE
-openSub (Or r1 r2) l = openSub r1 l .|. openSub r2 l
-openSub r l = OpenSub r l ""
-
-contSub :: RE -> Label -> String -> RE
-contSub r@(Zero _)        _ _ = r
-contSub (ClosedSub r1 ms) l s = ClosedSub (contSub r1 l s) ms
-contSub r                 l s = OpenSub r l s
-
-closedSub :: RE -> [(Label, String)] -> RE
-closedSub r@(Zero _)         _  = r
-closedSub (ClosedSub r1 ms1) ms = closedSub r1 (ms ++ ms1)
-closedSub r ms = ClosedSub r ms
--}
--- --------------------
---
--- smart constructor for sequence
-
-{-
-sequ                     :: RE -> RE -> RE
-sequ r1@(Zero _)  _      = r1                       -- {}.r  == {}
-sequ _ r2@(Zero _)       = r2                       -- r.{}  == {}
-sequ Unit r2             = r2                       -- ().r  == r
-sequ r1   Unit           = r1                       -- r.()  == r
-sequ (Seq r1 r2) r3      = sequ r1 (sequ r2 r3)     -- assoc. of .
-sequ (ClosedSub r1 ms) r2= closedSub (sequ r1 r2) ms -- propagate submatches upwards
-sequ r1   r2             = Seq r1 r2
--}
-
--- --------------------
---
 -- smart constructor for * and +
 
 star            :: RE -> RE
@@ -289,6 +273,7 @@ plus            :: RE -> RE
 plus r          = plus' r False
 
 -- shortest match
+
 starSM          :: RE -> RE
 starSM r        = star' r True
 
@@ -299,32 +284,156 @@ word            :: String -> RE
 word            = foldr (\ a b -> sym a <> b) unit
 
 -- --------------------
---
--- smart constructor for alternative
-{-
-infixr 2 .|.
 
-(.|.)                   :: RE -> RE -> RE
-Zero _    .|. r2        = r2                 -- zero
-r1        .|. Zero _    = r1                 -- zero
-Or r1 r2  .|. r3        = r1 .|. (r2 .|. r3) -- associativity
-r1        .|.  r2       = Or r1 r2
--}
+subRE :: Label -> RE -> RE
+subRE l r = BsubRE l <> r <> EsubRE
+
+-- submatches are ignored in right arg
+
+diff                   :: RE -> RE -> RE
+diff r1 r2             = diff' r1 (remSubmatches r2)
+
 -- --------------------
 --
--- smart constructor for intersection
+-- regex visitor
 
-infixr 3 .&.
+data VisitRE a
+  = VRE { vZero     :: ErrMsg -> a
+        , vUnit     :: a
+        , vDot      :: a
+        , vSyms     :: CharSet -> a
+        , vStar     :: a -> Bool -> a
+        , vPlus     :: a -> Bool -> a
+        , vSeq      :: a -> a -> a
+        , vOr       :: a -> a -> a
+        , vIsect    :: a -> a -> a
+        , vDiff     :: a -> a -> a
+        , vBsubRE   :: Label -> a
+        , vEsubRE   :: a
+        }
 
-(.&.)                   :: RE -> RE -> RE
-z@(Zero _) .&. _r2      = z                  -- {} n r2 = {}
-_r1  .&.  z@(Zero _)    = z                  -- r1 n {} = {}
+visitRE                 :: VisitRE a -> RE -> a
+visitRE v               = go
+  where
+    go (Zero e)         = vZero   v e
+    go Unit             = vUnit   v
+    go Dot              = vDot    v
+    go (Syms cs)        = vSyms   v cs
+    go (Star r b)       = vStar   v (go r) b
+    go (Plus r b)       = vPlus   v (go r) b
+    go (Seq   r1 r2)    = vSeq    v (go r1) (go r2)
+    go (Or    r1 r2)    = vOr     v (go r1) (go r2)
+    go (Isect r1 r2)    = vIsect  v (go r1) (go r2)
+    go (Diff  r1 r2)    = vDiff   v (go r1) (go r2)
+    go (BsubRE l)       = vBsubRE v l
+    go EsubRE           = vEsubRE v
+{-# INLINE visitRE #-}
 
-Star Dot _ .&. r2       = r2                 -- A* n r2 = r2
-r1       .&. Star Dot _ = r1                 -- r1 n A* = r1
+type TransformRE = VisitRE RE
 
-Isect r1 r2 .&. r3      = r1 .&. (r2 .&. r3) -- associativity
-r1 .&. r2               = Isect r1 r2
+idRE            :: TransformRE
+idRE            = VRE
+  { vZero       = Zero
+  , vUnit       = Unit
+  , vDot        = Dot
+  , vSyms       = Syms
+  , vStar       = Star
+  , vPlus       = Plus
+  , vSeq        = Seq
+  , vOr         = Or
+  , vIsect      = Isect
+  , vDiff       = Diff
+  , vBsubRE     = BsubRE
+  , vEsubRE     = EsubRE
+  }
+{-# INLINE idRE #-}
+
+nfRE            :: TransformRE
+nfRE            = idRE
+  { vStar       = star'
+  , vPlus       = plus'
+  , vSeq        = (<>)
+  , vOr         = alt'
+  , vIsect      = isect
+  , vDiff       = diff'
+  }
+{-# INLINE nfRE #-}
+
+simpleRE        :: TransformRE
+simpleRE        = nfRE
+  { vBsubRE     = const Unit
+  , vEsubRE     = Unit
+  }
+{-# INLINE simpleRE #-}
+
+remSubmatches   :: RE -> RE
+remSubmatches   = visitRE simpleRE
+
+type PredicateRE = VisitRE Bool
+
+anyRE           :: PredicateRE
+anyRE           = VRE
+  { vZero       = const False
+  , vUnit       = False
+  , vDot        = False
+  , vSyms       = const False
+  , vStar       = \ r _ -> r
+  , vPlus       = \ r _ -> r
+  , vSeq        = (||)
+  , vOr         = (||)
+  , vIsect      = (||)
+  , vDiff       = (||)
+  , vBsubRE     = const False
+  , vEsubRE     = False
+  }
+{-# INLINE anyRE #-}
+
+allRE           :: PredicateRE
+allRE           = VRE
+  { vZero       = const True
+  , vUnit       = True
+  , vDot        = True
+  , vSyms       = const True
+  , vStar       = \ r _ -> r
+  , vPlus       = \ r _ -> r
+  , vSeq        = (&&)
+  , vOr         = (&&)
+  , vIsect      = (&&)
+  , vDiff       = (&&)
+  , vBsubRE     = const True
+  , vEsubRE     = True
+  }
+{-# INLINE allRE #-}
+
+submatchRE      :: PredicateRE
+submatchRE      = anyRE
+  { vBsubRE     = const True
+  , vEsubRE     = True
+  }
+{-# INLINE submatchRE #-}
+
+isSimpleRE      :: RE -> Bool
+isSimpleRE      = not . visitRE submatchRE
+
+nullable        :: RE -> Bool
+nullable        = visitRE epsilonRE
+
+epsilonRE       :: PredicateRE
+epsilonRE       = VRE
+  { vZero       = const False
+  , vUnit       = True
+  , vDot        = False
+  , vSyms       = const False
+  , vStar       = const . const $ True
+  , vPlus       = \ r _ -> r
+  , vSeq        = (&&)
+  , vOr         = (||)
+  , vIsect      = (&&)
+  , vDiff       = \ r1 r2 -> r1 && not r2
+  , vBsubRE     = const True
+  , vEsubRE     = True
+  }
+{-# INLINE epsilonRE #-}
 
 -- ------------------------------------------------------------
 
@@ -335,26 +444,22 @@ r1 .&. r2               = Isect r1 r2
 
 -- --------------------
 
-alt                   :: RE -> RE -> RE
-alt (Zero _) r2       = r2
-alt r1 (Zero _)       = r1
+alt                     :: RE -> RE -> RE
+alt r1@(Star Dot _) r2
+  | isSimpleRE r2       = r1
 
-alt (Syms cs1) (Syms cs2) = syms (cs1 `unionCS` cs2)
-alt (Syms cs1) Dot        = Dot
-alt Dot        (Syms cs2) = Dot
-alt r1@(Star Dot _) r2    = r1
-alt r1 r2@(Star Dot _)    = r2
+alt r1 r2@(Star Dot _)
+  | isSimpleRE r1       = r2
 
-alt (Or r1 r2) r3         = alt r1 (alt r2 r3)
-                                        -- associativity
+alt (Or r1 r2) r3       = alt r1 (alt r2 r3) -- associativity
+
 alt r1 (Or r21 r22)
     | r1 == r21         = alt r1 r22  -- idempotent
---    | r1 > r21          = alt r21 (alt r1 r22)
-                                        -- symmetry
+
 alt r1   r2
     | r1 == r2          = r1            -- idempotent
---    | r1 > r2           = alt r2 r1   -- symmetry
-    | otherwise         = Or r1 r2
+
+alt r1 r2               = alt' r1 r2
 
 -- --------------------
 
@@ -409,6 +514,7 @@ _           === _           = False
 -- ------------------------------------------------------------
 --
 -- cases sorted by frequency of operators
+{- done with visitor
 
 nullable                :: RE -> Bool
 
@@ -432,6 +538,7 @@ nullable (Diff  r1 r2)  = nullable r1
                           not (nullable r2)
 nullable (BsubRE _)     = True
 nullable  EsubRE        = True
+-}
 
 -- ------------------------------------------------------------
 
@@ -471,7 +578,7 @@ delta (Isect r1 r2) c    = delta r1 c
                            delta r2 c
 
 delta (Diff r1 r2) c     = delta r1 c
-                           `diff`
+                           `diff'`
                            delta r2 c
 
 delta (BsubRE _) c       = noMatch
@@ -584,44 +691,42 @@ showRegex p r
 -- remove submatch ops BsubRE and EsubRE and
 -- add submatches to submatch context
 
-deriveSubREs :: Tr (SubMatches, RE)
-deriveSubREs = repeatTr $ openSubREs `andThen` closeSubREs
+deriveSubREs            :: (SubMatches, RE) -> TrRex (SubMatches, RE)
+deriveSubREs            = fixTr $ openSubREs >=> closeSubREs
 
-openSubREs :: Tr (SubMatches, RE)
-openSubREs =
-  repeatTr $ evalSubRE isBsub addSub
+openSubREs              :: (SubMatches, RE) -> TrRex (SubMatches, RE)
+openSubREs              = fixTr $ evalSubRE isBsub addSub
   where
-    isBsub (BsubRE _)    = True
-    isBsub _             = False
+    isBsub (BsubRE _)   = True
+    isBsub _            = False
 
-    addSub sm (BsubRE l) = sm {openSubs = (l, "") : openSubs sm}
-    addSub _  r          = error $ "openSubRE: illegal RE: " ++ show r
+    addSub sm (BsubRE l)= sm {openSubs = (l, "") : openSubs sm}
+    addSub _  r         = error $ "openSubRE: illegal RE: " ++ show r
 
-closeSubREs :: Tr (SubMatches, RE)
-closeSubREs =
-  repeatTr $ evalSubRE isEsub closeSub
+closeSubREs             :: (SubMatches, RE) -> TrRex (SubMatches, RE)
+closeSubREs             = fixTr $ evalSubRE isEsub closeSub
   where
-    isEsub EsubRE      = True
-    isEsub _           = False
+    isEsub EsubRE       = True
+    isEsub _            = False
 
-    closeSub sm EsubRE =  SM { closedSubs = cm'
-                             , openSubs   = om'
-                             }
+    closeSub sm EsubRE  =  SM { closedSubs = cm'
+                              , openSubs   = om'
+                              }
       where
-        (l, s) : om'   = openSubs sm
-        cm'            = (l, s) : closedSubs sm
-    closeSub sm r      = error $ "closeSubRE: illegal RE: " ++ show r
+        (l, s) : om'    = openSubs sm
+        cm'             = (l, s) : closedSubs sm
+    closeSub _sm r      = error $ "closeSubRE: illegal RE: " ++ show r
 
 -- evaluate action for a leading pseudo regex (BsubRE, EsubRE, ...)
 -- and remove it from the re
-evalSubRE :: (RE -> Bool) ->
-             (SubMatches -> RE -> SubMatches) ->
-             Tr (SubMatches, RE)
+evalSubRE               :: (RE -> Bool) ->
+                           (SubMatches -> RE -> SubMatches) ->
+                           (SubMatches, RE) -> TrRex (SubMatches, RE)
 evalSubRE p sub e@(sm, r) =
   case splitFstRE p r of
-    Nothing       -> return (noChange, e)
-    Just (r1, r2) -> do r' <- toNF r2
-                        return (hasChanged, (sub sm r1, r'))
+    Nothing             -> return e
+    Just (r1, r2)       -> do r' <- liftTrRex $ toNF r2
+                              changed (sub sm r1, r')
 
 
 -- split the leftmost sub regex (BsubRE, EsubRE, ...) from a regex
@@ -633,8 +738,8 @@ evalSubRE p sub e@(sm, r) =
 --
 -- must be extended when further logical ops, e.g. intersection, are added
 
-splitFstRE :: (RE -> Bool) -> RE -> Maybe (RE, RE)
-splitFstRE p = go
+splitFstRE          :: (RE -> Bool) -> RE -> Maybe (RE, RE)
+splitFstRE p        = go
   where
     go r
       | p r         = Just (r, Unit)
@@ -642,13 +747,11 @@ splitFstRE p = go
     go (Seq r1 r2)
       | p r1        = Just (r1, r2)
 
-    go (Seq  r1 r2) = (\ (b, r1') -> (b, r1'  <>    r2))
-                      <$>
-                      go r1
+    go (Seq  r1 r2) = second (<> r2) <$> go r1
 
-    go (Diff r1 r2) = (\ (b, r1') -> (b, r1' `diff` r2))
-                      <$>
-                      go r1
+    go (Diff r1 r2) = (second (`diff'` r2) <$> go r1)
+                  --  <|>
+                  --  (second (r1 `diff'`) <$> go r2)
 
     go _            = Nothing
 
@@ -664,6 +767,75 @@ splitFstRE p = go
 -- within the tr-functions
 --
 -- currently (only) used in evaluating submatch RE's
+--
+-- this is a writer monad with a boolean
+
+newtype TrRex a = TR (REX (a, Any))
+
+instance Functor TrRex where
+  fmap f (TR t) = TR $ first f <$> t
+
+instance Applicative TrRex where
+  pure = return
+  (<*>) = ap
+
+instance Monad TrRex where
+  return x      = TR $ return (x, mempty)
+  (TR t1) >>= f = TR $ do (x1, c1)   <- t1
+                          let (TR t2) = f x1
+                          (x2, c2)   <- t2
+                          return (x2, c1 <> c2)
+
+instance MonadWriter Any TrRex where
+  writer (x, c) = TR $ return (x, c)
+  tell c        = TR $ return ((), c)
+  listen (TR t) = TR $ do r@(_x, c) <- t
+                          return (r, c)
+  pass   (TR t) = TR $ do ((x, f), c) <- t
+                          return (x, f c)
+
+changed         :: a -> TrRex a
+changed x       = writer (x, Any True)
+
+hasChanged'     :: Any -> Bool
+hasChanged'     = getAny
+
+runTrRex        :: TrRex a -> REX (a, Bool)
+runTrRex (TR t) = second getAny <$> t
+
+execTrRex       :: TrRex a -> REX a
+execTrRex t     = fst <$> runTrRex t
+
+liftTrRex       :: REX a -> TrRex a
+liftTrRex m     = TR $ (,mempty) <$> m
+
+-- --------------------
+--
+-- try a 1. transformation, only when applied
+-- with success, apply 2. transformation
+
+onChanged :: (a -> TrRex a) -> (a -> TrRex a) -> a -> TrRex a
+onChanged f g x = do
+  (y, c) <- listen $ f x
+  if hasChanged' c
+    then g y
+    else return y
+
+-- try 1. transformation, only if no success
+-- try 2. transformation on input x
+
+onFailure :: (a -> TrRex a) -> (a -> TrRex a) -> a -> TrRex a
+onFailure f g x = do
+  (y, c) <- listen $ f x
+  if hasChanged' c
+    then return y
+    else g x
+
+-- apply a transformation until nothing changes anymore
+fixTr :: (a -> TrRex a) -> a -> TrRex a
+fixTr f = f `onChanged` fixTr f
+
+-- ----------------------------------------
 
 type Tr a = a -> REX (Changed, a)
 
@@ -686,6 +858,8 @@ idTr = \ x -> return (noChange, x)
 -- try 2 transformations in a sequence
 -- 2. transformation is always tried independently
 -- of success in the 1. transformation
+--
+-- (>=>)
 
 andThen :: Tr a -> Tr a -> Tr a
 andThen f g x = do
