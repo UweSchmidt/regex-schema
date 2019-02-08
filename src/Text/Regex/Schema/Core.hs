@@ -33,6 +33,9 @@ data RE
   | Diff      RE RE -- r1 - r2
   | BsubRE    Label
   | EsubRE
+  | SubRE     RE Label String
+  | CSub    [(Label, String)]
+
 --  | SubRE     RE Label  -- submatch
 --  | OpenSub   RE Label String  -- TODO: generalize -- open subexpr with string and len of submatch
 --  | ClosedSub RE [(Label, String)]  -- TODO: generalize -- list of completely parsed submatches
@@ -43,10 +46,12 @@ instance Show RE where  show = showRegex 0
 type ErrMsg = String
 type Label  = String
 
+instance Semigroup RE where
+  (<>) = seq'
+
 instance Monoid RE where
   mempty  = unit
-  mappend = seq'
-  mconcat = foldr seq' unit
+  mconcat = foldr (<>) unit
 
 -- <> is sequ(ence)
 
@@ -56,9 +61,11 @@ newtype Context = CX ()
 
 deriving instance Show Context
 
+instance Semigroup Context where
+  CX x <> CX y = CX $ x <> y
+
 instance Monoid Context where
   mempty = CX ()
-  CX x `mappend` CX y = CX $ x <> y
 
 -- ----------------------------------------
 
@@ -132,7 +139,7 @@ toNF (Star r shortest)
 
 toNF (Plus r b)               = toNF (r <> (star' r b))
 
-toNF r0@(Diff r1 r2)          = toNF r1
+toNF (Diff r1 r2)             = toNF r1
                                 >>=
                                 \ r' -> toREX (r' `diff'` r2)
 
@@ -140,11 +147,11 @@ toNF r0@(Seq r1 r2)          = case r1 of
   Or r11 r12                 -> toNF (r11 <> r2)
                                 <|>
                                 toNF (r12 <> r2)
-  Star r1 shortest
+  Star r11 shortest
     | shortest               -> toNF r2
                                 <|>
-                                toNF (plus' r1 True  <> r2)
-    | otherwise              -> toNF (plus' r1 False <> r2) --longest match
+                                toNF (plus' r11 True  <> r2)
+    | otherwise              -> toNF (plus' r11 False <> r2) --longest match
                                 <|>
                                 toNF r2
   Plus r11 b                 -> toNF (r11 <> star' r11 b <> r2)
@@ -184,6 +191,10 @@ seq' r1@(Zero _)   _    = r1
 seq' _    r2@(Zero _)   = r2
 seq' Unit          r2   = r2
 seq' r1          Unit   = r1
+seq' (CSub ms1) r2
+  | CSub ms2 <- r2    = CSub $ ms1 ++ ms2
+  | (Seq (CSub ms21) r22) <- r2
+                        = CSub (ms1 ++ ms21) `seq` r22
 seq' (Seq r11 r12) r2   = seq' r11 (seq' r12 r2)
 seq' r1            r2   = Seq r1 r2
 
@@ -193,8 +204,8 @@ alt' (Zero _) r2        = r2
 alt' r1 (Zero _)        = r1
 alt' (Syms cs1) (Syms cs2)
                         = syms (cs1 `unionCS` cs2)
-alt' (Syms cs1) Dot     = Dot
-alt' Dot     (Syms cs2) = Dot
+alt' (Syms _)   Dot     = Dot
+alt' Dot     (Syms _)   = Dot
 alt' (Or r1 r2) r3      = alt' r1 (alt' r2 r3) -- associativity
 alt' r1 r2              = Or r1 r2
 
@@ -207,11 +218,11 @@ diff' Unit            r2
   | nullable r2         = noMatch
 diff' r1 Unit
   | not (nullable r1)   = r1
-diff' (Diff r11 r12) r2  = r11 `diff'` (r12 `alt'` r2)
+diff' (Diff r11 r12) r2 = r11 `diff'` (r12 `alt'` r2)
 diff' (Syms cs1) (Syms cs2)
                         = syms (cs1 `diffCS` cs2)
-diff' Dot     (Syms cs2) = syms (compCS cs2)
-diff' (Syms cs1) Dot     = noMatch
+diff' Dot    (Syms cs2) = syms (compCS cs2)
+diff' (Syms _) Dot      = noMatch
 diff' r1 r2
   | r1 == r2            = r1
   | otherwise           = Diff r1 r2
@@ -288,10 +299,15 @@ word            = foldr (\ a b -> sym a <> b) unit
 subRE :: Label -> RE -> RE
 subRE l r = BsubRE l <> r <> EsubRE
 
--- submatches are ignored in right arg
+subRE'          :: Label -> RE -> RE
+subRE' l r      = SubRE r l ""
 
-diff                   :: RE -> RE -> RE
-diff r1 r2             = diff' r1 (remSubmatches r2)
+cSub            :: Label -> String -> RE
+cSub l r        = CSub [(l, r)]
+
+diff            :: RE -> RE -> RE
+diff            = diff'
+-- diff r1 r2             = diff' r1 (remSubmatches r2)
 
 -- --------------------
 --
@@ -310,6 +326,8 @@ data VisitRE a
         , vDiff     :: a -> a -> a
         , vBsubRE   :: Label -> a
         , vEsubRE   :: a
+        , vSubRE    :: a -> Label -> String -> a
+        , vCSub     :: [(Label, String)] -> a
         }
 
 visitRE                 :: VisitRE a -> RE -> a
@@ -327,6 +345,8 @@ visitRE v               = go
     go (Diff  r1 r2)    = vDiff   v (go r1) (go r2)
     go (BsubRE l)       = vBsubRE v l
     go EsubRE           = vEsubRE v
+    go (SubRE r l s)    = vSubRE  v (go r) l s
+    go (CSub ms)        = vCSub  v ms
 {-# INLINE visitRE #-}
 
 type TransformRE = VisitRE RE
@@ -345,6 +365,8 @@ idRE            = VRE
   , vDiff       = Diff
   , vBsubRE     = BsubRE
   , vEsubRE     = EsubRE
+  , vSubRE      = SubRE
+  , vCSub       = CSub
   }
 {-# INLINE idRE #-}
 
@@ -363,6 +385,8 @@ simpleRE        :: TransformRE
 simpleRE        = nfRE
   { vBsubRE     = const Unit
   , vEsubRE     = Unit
+  , vSubRE      = \ r _ _ -> r
+  , vCSub       = const Unit
   }
 {-# INLINE simpleRE #-}
 
@@ -385,6 +409,8 @@ anyRE           = VRE
   , vDiff       = (||)
   , vBsubRE     = const False
   , vEsubRE     = False
+  , vSubRE      = \ r _ _ -> r
+  , vCSub       = const False
   }
 {-# INLINE anyRE #-}
 
@@ -402,6 +428,8 @@ allRE           = VRE
   , vDiff       = (&&)
   , vBsubRE     = const True
   , vEsubRE     = True
+  , vSubRE      = \ r _ _ -> r
+  , vCSub       = const True
   }
 {-# INLINE allRE #-}
 
@@ -409,6 +437,8 @@ submatchRE      :: PredicateRE
 submatchRE      = anyRE
   { vBsubRE     = const True
   , vEsubRE     = True
+  , vSubRE      = const . const . const $ True
+  , vCSub       = const True
   }
 {-# INLINE submatchRE #-}
 
@@ -432,8 +462,28 @@ epsilonRE       = VRE
   , vDiff       = \ r1 r2 -> r1 && not r2
   , vBsubRE     = const True
   , vEsubRE     = True
+  , vSubRE      = \ r _ _ -> r
+  , vCSub       = const False
   }
 {-# INLINE epsilonRE #-}
+
+isCSub          :: RE -> Bool
+isCSub          = visitRE cSubRE
+
+cSubRE          :: PredicateRE
+cSubRE          = anyRE
+  { vStar       = const . const $ False
+  , vPlus       = const . const $ False
+  , vSeq        = (&&)
+  , vOr         = (||)
+  , vIsect      = (&&)
+  , vDiff       = (&&)
+  , vBsubRE     = const False
+  , vEsubRE     = False
+  , vSubRE      = const . const . const $ False
+  , vCSub       = const True
+  }
+{-# INLINE cSubRE #-}
 
 -- ------------------------------------------------------------
 
@@ -443,6 +493,10 @@ epsilonRE       = VRE
 -- not all allgebraic laws concerning sets are realized
 
 -- --------------------
+--
+-- exported smart constructor
+-- does some more optimizations
+-- than the internally used alt'
 
 alt                     :: RE -> RE -> RE
 alt r1@(Star Dot _) r2
@@ -483,34 +537,6 @@ isect r1   r2
 --    | r1 > r2           = isect r2 r1   -- symmetry
     | otherwise         = Isect r1 r2
 
--- --------------------
-{-
-diff                    :: RE -> RE -> RE
-diff r1@(Zero _) r2     = r1
-diff r1 (Zero _)        = r1
-diff r1   r2
-    | r1 === r2         = noMatch
-    | otherwise         = Diff r1 r2
--}
--- ------------------------------------------------------------
---
--- equivalence: used for itempotent op's:  a `op` a == a
-{-
-infix 4 ===
-
-(===) :: RE -> RE -> Bool
-Zero  _     === Zero _      = True
-Unit        === Unit        = True
-Syms  c1    === Syms c2     = c1 == c2
-Star  r1 m1 === Star r2 m2  = r1 === r2 && m1 ==  m2
-Plus  r1 m1 === Plus r2 m2  = r1 === r2 && m1 ==  m2
-Seq   r1 s1 === Seq r2 s2   = r1 === r2 && s1 === s2
-Or    r1 s1 === Or r2 s2    = r1 === r2 && s1 === s2
-Isect r1 s1 === Isect r2 s2 = r1 === r2 && s1 === s2
-Diff  r1 s1 === Diff r2 s2  = r1 === r2 && s1 === s2
-SubRE r1 l1 === SubRE r2 l2 = r1 === r2 && l1 ==  l2
-_           === _           = False
--}
 -- ------------------------------------------------------------
 --
 -- cases sorted by frequency of operators
@@ -563,6 +589,8 @@ delta r0@(Plus r s) c
   | otherwise            = delta (r <> (r0   `alt` unit)) c
 
 delta (Seq r1 r2) c
+  | (CSub _) <- r1       = r1 <> delta r2 c
+  | (CSub _) <- r2       = delta r1 c <> r2
   | nullable r1          = dr1 `alt` dr2
   | otherwise            = dr1
                            where
@@ -581,9 +609,19 @@ delta (Diff r1 r2) c     = delta r1 c
                            `diff'`
                            delta r2 c
 
-delta (BsubRE _) c       = noMatch
+delta (BsubRE _) _c      = noMatch
 
-delta  EsubRE    c       = noMatch
+delta  EsubRE    _c      = noMatch
+
+delta (SubRE r l s) c
+  | (Zero _) <- r'       = r'
+  | Unit     <- r'       = cSub l s'
+  | otherwise            = SubRE r' l s'
+    where
+      r' = delta r c
+      s' = c : s
+
+delta r0@(CSub _) _     = noMatch
 
 -- ------------------------------------------------------------
 
@@ -605,18 +643,20 @@ showR :: RE -> String
 showR = showRegex 6
 
 prio    :: RE -> Int
-prio (Zero _)    = 0
-prio Unit        = 0
-prio Dot         = 0
-prio (Syms _)    = 0
-prio (Star _ _)  = 1
-prio (Plus _ _)  = 1
-prio (Seq _ _)   = 2
-prio (Isect _ _) = 3
-prio (Diff _ _)  = 4
-prio (Or _ _)    = 5
-prio (BsubRE _)  = 0
-prio  EsubRE     = 0
+prio (Zero _)       = 0
+prio Unit           = 0
+prio Dot            = 0
+prio (Syms _)       = 0
+prio (Star _ _)     = 1
+prio (Plus _ _)     = 1
+prio (Seq _ _)      = 2
+prio (Isect _ _)    = 3
+prio (Diff _ _)     = 4
+prio (Or _ _)       = 5
+prio (BsubRE _)     = 0
+prio  EsubRE        = 0
+prio (SubRE _ _ _)  = 0
+prio (CSub _)       = 0
 
 showRegex       :: Int -> RE -> String
 showRegex p r
@@ -653,9 +693,15 @@ showRegex p r
                                showRegex pr r2
     showRegex' (BsubRE l)    = "(" ++ l ++ ":"
     showRegex'  EsubRE       = ")"
+
+    showRegex' (SubRE r1 l s) = l ++ s' ++ ":" ++
+                                showRegex pr r1
+                                where
+                                  s' | null s    = s
+                                     | otherwise = "=" ++ s
+    showRegex' (CSub ms)      = show ms
+
 {-
-    showRegex' (SubRE r1 l)  = l ++ ":" ++
-                               showRegex pr r1
     showRegex' (OpenSub r1 l s)
                              = l ++ "=" ++ s ++ ":" ++
                                showRegex pr r1
